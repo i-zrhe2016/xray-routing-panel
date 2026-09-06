@@ -318,6 +318,12 @@ def api_ai_node_status():
     return jsonify({"ok": True, "status": state.ai_node_status()})
 
 
+@route("/api/ai-nodes/status", methods=["GET"])
+def api_ai_nodes_status():
+    nodes = state.ai_nodes_status()
+    return jsonify({"ok": True, "status": state.ai_node_status(nodes), "nodes": nodes})
+
+
 @route("/api/ai-node/restart", methods=["POST"])
 def api_restart_ai_node():
     try:
@@ -326,4 +332,15 @@ def api_restart_ai_node():
         return json_success_response("AI 节点已执行重启。")
     except (ValidationError, RuntimeError) as exc:
         log_business_event("node.ai.restarted", result="failure", error_code="restart_failed", message=str(exc), resource_type="node", resource_id="ai_node")
+        return json_error_response(str(exc), status_code=400)
+
+
+@route("/api/ai-nodes/<node_id>/restart", methods=["POST"])
+def api_restart_ai_node_by_id(node_id):
+    try:
+        state.restart_ai_node_or_raise(node_id)
+        log_business_event("node.ai.restarted", resource_type="node", resource_id=node_id)
+        return json_success_response("AI 节点已执行重启。")
+    except (ValidationError, RuntimeError) as exc:
+        log_business_event("node.ai.restarted", result="failure", error_code="restart_failed", message=str(exc), resource_type="node", resource_id=node_id)
         return json_error_response(str(exc), status_code=400)

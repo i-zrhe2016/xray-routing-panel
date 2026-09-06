@@ -12,6 +12,12 @@ export default {
     aiNode() {
       return this.panel.aiNodeStatus || {};
     },
+    aiNodes() {
+      if (Array.isArray(this.panel.aiNodes) && this.panel.aiNodes.length) {
+        return this.panel.aiNodes;
+      }
+      return [this.aiNode];
+    },
     trafficRouting() {
       return this.panel.trafficRouting || {};
     },
@@ -89,6 +95,12 @@ export default {
       if (reality.ok) return "正常";
       if (reality.cert_matches_sni === false) return "证书与 SNI 不符";
       return "失败";
+    },
+    aiNodeTone(node) {
+      return node.reachable ? "ok" : (node.configured ? "bad" : "warn");
+    },
+    aiNodeActionKey(node) {
+      return node.node_id ? `restart-ai-node:${node.node_id}` : "restart-ai-node";
     },
   },
 };
@@ -189,39 +201,49 @@ export default {
     <div class="a-card">
       <div class="a-card-head">
         <p class="eyebrow">AI NODE</p>
-        <h3>AI 节点</h3>
-        <p>远端独立 Xray，SSH 纳管，复用数据面 REALITY 参数，freedom 直出。</p>
+        <h3>AI 节点（{{ aiNodes.length }}）</h3>
+        <p>远端独立 Xray，分别通过 SSH 纳管；每台节点可单独检查状态和重启。</p>
       </div>
-      <div class="a-tiles">
-        <div class="a-tile">
-          <span>{{ aiNode.label || "AI 节点" }}</span>
-          <strong :class="aiNode.reachable ? 'ok' : (aiNode.configured ? 'bad' : 'warn')">
-            {{ panel.aiNodeStatusLabel() }}
-          </strong>
-          <small>{{ aiNode.management_target || "未纳管（AI_NODE_SSH_TARGET 未设置）" }}</small>
-        </div>
-        <div class="a-tile">
-          <span>配置路径</span>
-          <strong>{{ aiNode.config_path || "—" }}</strong>
-          <small>{{ aiNode.supports_sync ? "支持 SSH 推送" : "不支持配置推送" }}</small>
-        </div>
-        <div class="a-tile">
-          <span>重启能力</span>
-          <strong :class="aiNode.supports_restart ? 'ok' : 'warn'">
-            {{ aiNode.supports_restart ? "支持" : "不支持" }}
-          </strong>
-        </div>
-      </div>
-      <div class="a-actions">
-        <button
-          v-if="aiNode.configured && aiNode.supports_restart"
-          class="a-btn secondary"
-          type="button"
-          :disabled="panel.isBusy('restart-ai-node')"
-          @click="panel.restartAiNode"
+      <div class="ai-node-list">
+        <article
+          v-for="node in aiNodes"
+          :key="node.node_id || 'legacy-ai-node'"
+          class="ai-node-card"
+          :data-testid="`ai-node-card-${node.node_id || 'legacy'}`"
         >
-          {{ panel.isBusy("restart-ai-node") ? "重启中..." : "重启 AI 节点" }}
-        </button>
+          <div class="a-tiles">
+            <div class="a-tile">
+              <span>{{ node.label || "AI 节点" }}</span>
+              <strong :class="aiNodeTone(node)">{{ panel.aiNodeStatusLabel(node) }}</strong>
+              <small>{{ node.management_target || "未纳管（AI_NODE_SSH_TARGETS 未设置）" }}</small>
+            </div>
+            <div class="a-tile">
+              <span>配置路径</span>
+              <strong>{{ node.config_path || "—" }}</strong>
+              <small>{{ node.supports_sync ? "支持 SSH 推送" : "不支持配置推送" }}</small>
+            </div>
+            <div class="a-tile">
+              <span>重启能力</span>
+              <strong :class="node.supports_restart ? 'ok' : 'warn'">
+                {{ node.supports_restart ? "支持" : "不支持" }}
+              </strong>
+              <small>{{ node.last_error || "SSH 管理通道已纳入状态检查" }}</small>
+            </div>
+          </div>
+          <div class="a-actions">
+            <button
+              v-if="node.configured && node.supports_restart"
+              class="a-btn secondary"
+              type="button"
+              :data-testid="`restart-ai-node-${node.node_id || 'legacy'}`"
+              :aria-label="`重启${node.label || 'AI 节点'}`"
+              :disabled="panel.isBusy(aiNodeActionKey(node))"
+              @click="panel.restartAiNode(node.node_id || '')"
+            >
+              {{ panel.isBusy(aiNodeActionKey(node)) ? "重启中..." : `重启${node.label || "AI 节点"}` }}
+            </button>
+          </div>
+        </article>
       </div>
     </div>
 

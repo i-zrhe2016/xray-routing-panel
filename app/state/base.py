@@ -7,9 +7,7 @@ from urllib.parse import urlencode
 
 from ..config import (
     AI_NODE_CONFIG_OUT,
-    AI_NODE_CONTAINER_NAME,
     AI_NODE_PROBE_HOST,
-    AI_NODE_SSH_TARGET,
     CONTROL_PLANE_BACKUP_UPSTREAM_URL,
     CONTROL_PLANE_BACKUP_XRAY_ENABLED,
     DATAPLANE_CONFIG_PATH,
@@ -637,7 +635,7 @@ class CoreService:
                 ]
         # When the AI node is managed via SSH, also render config-ai-node.json
         # so the control plane can push it to the remote AI node.
-        if AI_NODE_SSH_TARGET or AI_NODE_CONTAINER_NAME:
+        if any(node.supports_sync() for node in self._panel.ai_nodes.values()):
             command += [
                 "--ai-node-config-out",
                 str(AI_NODE_CONFIG_OUT),
@@ -658,8 +656,16 @@ class CoreService:
         return []
     def restart_data_plane(self):
         return self._panel.data_plane.restart()
-    def ai_node_status(self):
-        if self._panel.ai_node is None:
+    def ai_nodes_status(self):
+        statuses = []
+        for node_id, controller in self._panel.ai_nodes.items():
+            status = controller.status_summary()
+            status["node_id"] = node_id
+            statuses.append(status)
+        return statuses
+    def ai_node_status(self, nodes=None):
+        nodes = self._panel.ai_nodes_status() if nodes is None else nodes
+        if not nodes:
             return {
                 "role": "ai_node",
                 "label": "AI 节点",
@@ -670,28 +676,85 @@ class CoreService:
                 "supports_restart": False,
                 "supports_sync": False,
                 "last_error": "",
+                "nodes": [],
+                "node_count": 0,
+                "all_reachable": False,
+                "any_reachable": False,
             }
-        return self._panel.ai_node.status_summary()
+        if len(nodes) == 1:
+            status = dict(nodes[0])
+            status.update(
+                {
+                    "nodes": nodes,
+                    "node_count": 1,
+                    "all_reachable": bool(status.get("reachable")),
+                    "any_reachable": bool(status.get("reachable")),
+                }
+            )
+            return status
+
+        reachable = [bool(node.get("reachable")) for node in nodes]
+        running = [node.get("xray_running") for node in nodes]
+        if all(value is True for value in running):
+            aggregate_running = True
+        elif any(value is True for value in running):
+            aggregate_running = None
+        else:
+            aggregate_running = False
+        errors = [
+            f"{node.get('label')}: {node.get('last_error')}"
+            for node in nodes
+            if node.get("last_error")
+        ]
+        return {
+            "role": "ai_node",
+            "label": f"AI 节点（{len(nodes)}）",
+            "configured": all(bool(node.get("configured")) for node in nodes),
+            "reachable": any(reachable),
+            "xray_running": aggregate_running,
+            "management_target": "、".join(str(node.get("label") or node.get("node_id")) for node in nodes),
+            "api_server": "",
+            "config_path": "",
+            "access_log_path": "",
+            "supports_sync": all(bool(node.get("supports_sync")) for node in nodes),
+            "supports_restart": any(bool(node.get("supports_restart")) for node in nodes),
+            "last_error": "；".join(errors),
+            "nodes": nodes,
+            "node_count": len(nodes),
+            "all_reachable": all(reachable),
+            "any_reachable": any(reachable),
+        }
     def ai_node_running(self):
-        if self._panel.ai_node is None:
-            return False
+        return any(
+            self._node_running(controller)
+            for controller in self._panel.ai_nodes.values()
+        )
+    @staticmethod
+    def _node_running(controller):
         try:
-            return bool(self._panel.ai_node.is_running())
-        except Exception:
+            return bool(controller.is_running())
+        except (OSError, RuntimeError, ValueError):
             return False
     def sync_ai_node_config(self):
-        if self._panel.ai_node is None:
-            return []
-        return self._panel.ai_node.sync_generated_files(validate_config=True)
-    def restart_ai_node_or_raise(self):
-        if self._panel.ai_node is None:
-            raise ValidationError("AI 节点未配置（AI_NODE_SSH_TARGET 为空）。")
-        if not self._panel.ai_node.supports_restart():
+        uploaded = []
+        for controller in self._panel.ai_nodes.values():
+            if controller.supports_sync():
+                uploaded.extend(controller.sync_generated_files(validate_config=True))
+        return uploaded
+    def restart_ai_node_or_raise(self, node_id=None):
+        if not self._panel.ai_nodes:
+            raise ValidationError("AI 节点未配置（AI_NODE_SSH_TARGETS 为空）。")
+        controller = self._panel.ai_nodes.get(node_id) if node_id else self._panel.ai_node
+        if controller is None:
+            raise ValidationError(f"AI 节点不存在：{node_id}。")
+        if not controller.supports_restart():
             raise ValidationError("AI 节点未配置可用的重启方式。")
-        restarted = self._panel.ai_node.restart()
+        restarted = controller.restart()
         if not restarted:
             raise ValidationError("AI 节点不可重启。")
-        return self._panel.ai_node.status_summary()
+        status = controller.status_summary()
+        status["node_id"] = node_id or next(iter(self._panel.ai_nodes))
+        return status
     def data_plane_configured(self):
         return self._panel.data_plane.is_configured()
     def data_plane_running(self):
@@ -709,7 +772,7 @@ class CoreService:
         """
         if CONTROL_PLANE_BACKUP_UPSTREAM_URL:
             return CONTROL_PLANE_BACKUP_UPSTREAM_URL
-        if not AI_NODE_SSH_TARGET:
+        if not self._panel.ai_nodes:
             return ""
         if not self._panel.ai_node_running():
             return ""
@@ -761,7 +824,7 @@ class CoreService:
         """
         if not CONTROL_PLANE_BACKUP_XRAY_ENABLED:
             return False
-        if not AI_NODE_SSH_TARGET:
+        if not self._panel.ai_nodes:
             return False
         current_mode = self._panel.backup_xray_mode()
         previous_mode = getattr(self._panel, "_last_backup_mode", None)

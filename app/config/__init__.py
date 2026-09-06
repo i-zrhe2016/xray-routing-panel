@@ -27,6 +27,13 @@ from .parsers import (
     parse_timezone_env,
 )
 
+
+def _parse_csv_env(name):
+    """Read a small comma/newline-separated node inventory from the environment."""
+    raw = os.environ.get(name, "")
+    return tuple(item.strip() for item in raw.replace("\r", "\n").replace("\n", ",").split(",") if item.strip())
+
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DB_PATH = Path(os.environ.get("DB_PATH", DATA_DIR / "panel.db"))
@@ -81,6 +88,27 @@ DATAPLANE_PROBE_HOST = os.environ.get("DATAPLANE_PROBE_HOST", "127.0.0.1").strip
 AI_NODE_SSH_TARGET = os.environ.get(
     "AI_NODE_SSH_TARGET", ""
 ).strip()
+AI_NODE_SSH_TARGETS = _parse_csv_env("AI_NODE_SSH_TARGETS")
+AI_NODE_IDS = _parse_csv_env("AI_NODE_IDS")
+AI_NODE_LABELS = _parse_csv_env("AI_NODE_LABELS")
+AI_NODE_CONTAINER_NAMES = _parse_csv_env("AI_NODE_CONTAINER_NAMES")
+AI_NODE_RESTART_COMMANDS = _parse_csv_env("AI_NODE_RESTART_COMMANDS")
+AI_NODE_CONFIG_PATHS = _parse_csv_env("AI_NODE_CONFIG_PATHS")
+AI_NODE_API_SERVERS = _parse_csv_env("AI_NODE_API_SERVERS")
+AI_NODE_PROBE_HOSTS = _parse_csv_env("AI_NODE_PROBE_HOSTS")
+AI_NODE_LIST_CONFIGURED = any(
+    os.environ.get(name, "").strip()
+    for name in (
+        "AI_NODE_SSH_TARGETS",
+        "AI_NODE_IDS",
+        "AI_NODE_LABELS",
+        "AI_NODE_CONTAINER_NAMES",
+        "AI_NODE_RESTART_COMMANDS",
+        "AI_NODE_CONFIG_PATHS",
+        "AI_NODE_API_SERVERS",
+        "AI_NODE_PROBE_HOSTS",
+    )
+)
 AI_NODE_SSH_BIN = os.environ.get("AI_NODE_SSH_BIN", "ssh").strip() or "ssh"
 AI_NODE_SSH_OPTIONS = parse_shell_words_env(
     os.environ.get("AI_NODE_SSH_OPTIONS", ""),

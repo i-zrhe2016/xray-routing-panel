@@ -116,7 +116,10 @@ Xray access log 不包含按目标拆分的字节数，因此这些指标表示�
 `control-plane-cadvisor`；它提供 `xray-ai-node` 容器的 CPU、内存和网络总量，
 不替代 Xray 按入站方向的业务计数。
 
-本机 Docker 模式只要求控制面共享的 Node Exporter/cAdvisor targets 为 `up`；远端 AI 模式才需要额外的两个 AI targets。Grafana 的 AI 主机面板按 `node_role="ai_data_plane"` 区分 AI 节点，容器面板按 `host="ai-data-plane"` 和 `name` 区分容器。生产环境应在远端 AI 节点防火墙中仅允许控制面访问 `27168/27169`，不要将监控端口用于公网开放服务。
+本机 Docker 模式只要求控制面共享的 Node Exporter/cAdvisor targets 为 `up`；远端 AI 模式在
+`monitoring/prometheus/prometheus.yml` 中为每台节点配置独立 target。夏威夷使用
+`27168/27169`，台湾使用 `9100/18081`。Grafana 的 AI 主机面板按
+`node_role="ai_data_plane"` 和 `node_id` 区分节点，容器面板按 `host` 和 `name` 区分容器。
 
 ## SSH 认证边界
 
@@ -161,6 +164,24 @@ AI_NODE_CONFIG_PATH=
 - `AI_NODE_METRICS_URL`：面板读取 AI Xray expvar 的地址；默认只允许控制面回环地址，不得改成公网监听。
 - `AI_NODE_CONFIG_PATH=`：显式留空会使 `supports_sync=false`，禁止控制面上传配置。
 - `AI_NODE_CONTAINER_NAME=xray-ai-node` 提供本机容器状态检查和重启能力。
+
+## 多台远端 AI 节点
+
+需要同时纳管多台远端节点时，使用逗号或换行分隔的列表变量；各列表按相同顺序一一对应。
+面板会在 Dashboard 和“基础设施”页分别展示每台节点，并允许单独重启：
+
+```env
+AI_NODE_SSH_TARGETS=root@ai-hawaii.internal,root@ai-taiwan.internal
+AI_NODE_IDS=hawaii,taiwan
+AI_NODE_LABELS=AI 夏威夷,AI 台湾
+AI_NODE_CONTAINER_NAMES=xray,xray-ai-node
+AI_NODE_API_SERVERS=127.0.0.1:27166,127.0.0.1:27166
+AI_NODE_CONFIG_PATHS=
+```
+
+`AI_NODE_CONFIG_PATHS=` 保持为空时，控制面只做 SSH 状态检查和容器重启，不上传共享配置；两台远端
+Xray 的独立凭据和配置仍由各自节点负责。旧的单节点变量仍可用于兼容部署。逐节点重启 API 为
+`POST /api/ai-nodes/<node_id>/restart`。
 
 ## `app/xray/.env` 上游配置
 

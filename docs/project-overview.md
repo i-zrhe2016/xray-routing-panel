@@ -281,6 +281,8 @@ docker compose run --rm xray-routing-panel-db-backup \
 - `POST /api/data-plane/restart`: 重启数据面
 - `GET /api/ai-node/status`: 获取 AI 节点状态
 - `POST /api/ai-node/restart`: 重启 AI 节点
+- `GET /api/ai-nodes/status`: 获取多节点 AI 纳管状态
+- `POST /api/ai-nodes/<node_id>/restart`: 单独重启指定 AI 节点
 - `GET /api/dns-failover`: 获取 DNS 故障切换状态
 - `POST /api/dns-failover/check`: 立即执行一次 DNS 检测
 - `POST /api/dns-failover/switch`: 手动切主备

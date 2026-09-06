@@ -1213,6 +1213,27 @@ a {
   margin-top: 18px;
 }
 
+.ai-node-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.ai-node-card {
+  padding: 0 12px 12px;
+  border: 1px solid var(--c-line);
+  border-radius: 12px;
+  background: #f7f9fc;
+}
+
+.ai-node-card .a-tiles {
+  margin-top: 12px;
+}
+
+.ai-node-card .a-actions {
+  margin-top: 12px;
+}
+
 .a-tile {
   display: flex;
   min-width: 0;

@@ -21,6 +21,7 @@ export const CoreMixin = {
       subscription: {},
       dataPlaneStatus: {},
       aiNodeStatus: {},
+      aiNodes: [],
       aiRoutingStatus: {},
       dnsFailoverStatus: {},
       nodes: [],
@@ -84,6 +85,9 @@ export const CoreMixin = {
       this.subscription = dashboard.subscription || {};
       this.dataPlaneStatus = dashboard.meta?.data_plane_status || {};
       this.aiNodeStatus = dashboard.meta?.ai_node_status || {};
+      this.aiNodes = Array.isArray(dashboard.meta?.ai_nodes)
+        ? dashboard.meta.ai_nodes
+        : (Array.isArray(this.aiNodeStatus.nodes) ? this.aiNodeStatus.nodes : []);
       this.aiRoutingStatus = dashboard.meta?.ai_routing_status || {};
       this.dnsFailoverStatus = dashboard.meta?.dns_failover_status || {};
       this.nodes = dashboard.meta?.nodes || [];
@@ -232,16 +236,21 @@ export const CoreMixin = {
       }
     },
 
-    aiNodeStatusLabel() {
-      const s = this.aiNodeStatus || {};
+    aiNodeStatusLabel(status = this.aiNodeStatus) {
+      const s = status || {};
       if (!s.configured) return "未纳管";
+      if (s.any_reachable && s.all_reachable === false) return "部分可用";
       if (s.reachable) return "运行中";
       return "不可达";
     },
 
-    async restartAiNode() {
-      await this.runAction("restart-ai-node", async () => {
-        const data = await this.requestJson("/api/ai-node/restart", { method: "POST" });
+    async restartAiNode(nodeId = "") {
+      const actionKey = nodeId ? `restart-ai-node:${nodeId}` : "restart-ai-node";
+      const endpoint = nodeId
+        ? `/api/ai-nodes/${encodeURIComponent(nodeId)}/restart`
+        : "/api/ai-node/restart";
+      await this.runAction(actionKey, async () => {
+        const data = await this.requestJson(endpoint, { method: "POST" });
         this.applyResponse(data);
       });
     },

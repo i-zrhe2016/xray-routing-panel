@@ -98,6 +98,30 @@ class NodeControlTest(unittest.TestCase):
         self.assertEqual(calls, [True])
         self.assertEqual(uploaded, ["/etc/xray/config.json"])
 
+    def test_panel_builds_multiple_ai_node_controllers_and_aggregates_status(self):
+        os.environ["AI_NODE_SSH_TARGETS"] = "root@hawaii,root@taiwan"
+        os.environ["AI_NODE_IDS"] = "hawaii,taiwan"
+        os.environ["AI_NODE_LABELS"] = "AI 夏威夷,AI 台湾"
+        os.environ["AI_NODE_CONTAINER_NAMES"] = "xray,xray-ai-node"
+        os.environ["AI_NODE_API_SERVERS"] = "127.0.0.1:27166,127.0.0.1:27166"
+        os.environ["AI_NODE_CONFIG_PATHS"] = ""
+        state_module = load_state_module(self.root)
+        state = state_module.PanelState()
+
+        self.assertEqual(list(state.ai_nodes), ["hawaii", "taiwan"])
+        self.assertEqual(state.ai_nodes["hawaii"].config.container_name, "xray")
+        self.assertEqual(state.ai_nodes["taiwan"].config.container_name, "xray-ai-node")
+        self.assertFalse(any(node.supports_sync() for node in state.ai_nodes.values()))
+
+        state.ai_nodes["hawaii"].is_running = lambda: False
+        state.ai_nodes["taiwan"].is_running = lambda: True
+        status = state.ai_node_status()
+
+        self.assertTrue(status["any_reachable"])
+        self.assertFalse(status["all_reachable"])
+        self.assertIsNone(status["xray_running"])
+        self.assertEqual([node["node_id"] for node in status["nodes"]], ["hawaii", "taiwan"])
+
     def test_startup_restarts_remote_data_plane_when_synced_config_changed(self):
         os.environ["DATAPLANE_SSH_TARGET"] = "root@default-node"
         os.environ["DATAPLANE_CONFIG_PATH"] = "/etc/xray/config.json"

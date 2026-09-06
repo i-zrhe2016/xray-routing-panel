@@ -387,7 +387,8 @@ def collect_dashboard_state(message="", level="info", ai_sync_error=""):
     summary = state.query_summary(ports)
     subscription = build_subscription_snapshot(ports)
     data_plane_status = state.data_plane_status()
-    ai_node_status = state.ai_node_status()
+    ai_nodes_status = state.ai_nodes_status()
+    ai_node_status = state.ai_node_status(ai_nodes_status)
     ai_routing_status = state.ai_routing_status(sync_error=ai_sync_error)
     dns_failover_status = state.dns_failover_status()
     commerce_summary = state.query_commerce_overview()
@@ -447,6 +448,7 @@ def collect_dashboard_state(message="", level="info", ai_sync_error=""):
             "tenant_panel_prefix": "/tenant/",
             "data_plane_status": data_plane_status,
             "ai_node_status": ai_node_status,
+            "ai_nodes": ai_nodes_status,
             "ai_routing_status": ai_routing_status,
             "dns_failover_status": dns_failover_status,
             "nodes": nodes,

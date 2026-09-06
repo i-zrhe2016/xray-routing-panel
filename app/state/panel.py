@@ -2,17 +2,26 @@ import threading
 
 
 from ..config import (
-    AI_NODE_CONFIG_OUT,
     AI_NODE_API_SERVER,
+    AI_NODE_API_SERVERS,
+    AI_NODE_CONFIG_OUT,
     AI_NODE_CONFIG_PATH,
+    AI_NODE_CONFIG_PATHS,
     AI_NODE_CONTAINER_NAME,
+    AI_NODE_CONTAINER_NAMES,
     AI_NODE_DOCKER_BIN,
+    AI_NODE_IDS,
+    AI_NODE_LABELS,
+    AI_NODE_LIST_CONFIGURED,
     AI_NODE_PROBE_HOST,
+    AI_NODE_PROBE_HOSTS,
     AI_NODE_RESTART_COMMAND,
+    AI_NODE_RESTART_COMMANDS,
     AI_NODE_SSH_BIN,
     AI_NODE_SSH_KNOWN_HOSTS,
     AI_NODE_SSH_OPTIONS,
     AI_NODE_SSH_TARGET,
+    AI_NODE_SSH_TARGETS,
     AI_NODE_XRAY_BIN,
     CF_API_TOKEN,
     CF_DNS_RECORD_ID,
@@ -21,9 +30,10 @@ from ..config import (
     CF_DNS_RECORD_TTL,
     CF_DNS_RECORD_TYPE,
     CF_ZONE_ID,
+    DATA_DIR,
     DATAPLANE_ACCESS_LOG_PATH,
-    DATAPLANE_API_SERVER,
     DATAPLANE_AI_REPORT_PATH,
+    DATAPLANE_API_SERVER,
     DATAPLANE_CONTAINER_NAME,
     DATAPLANE_DOCKER_BIN,
     DATAPLANE_DYNAMIC_ROUTING_PATH,
@@ -37,7 +47,6 @@ from ..config import (
     DATAPLANE_SSH_OPTIONS,
     DATAPLANE_SSH_TARGET,
     DATAPLANE_XRAY_BIN,
-    DATA_DIR,
     DEFAULT_UPSTREAM_HOST,
     DEFAULT_UPSTREAM_PORT,
     DNS_FAILOVER_BACKUP_CONTENT,
@@ -71,6 +80,17 @@ from .dns_failover import DnsFailoverService
 from .ports import PortsService
 from .probes import ProbesService
 from .traffic import TrafficService
+
+
+def _expand_ai_node_values(values, count, field_name, fallback=""):
+    values = tuple(values or ())
+    if not values:
+        return tuple(fallback for _ in range(count))
+    if len(values) == 1:
+        return tuple(values[0] for _ in range(count))
+    if len(values) != count:
+        raise ValueError(f"{field_name} 必须与 AI 节点数量一致。")
+    return values
 
 
 class PanelState:
@@ -140,24 +160,80 @@ class PanelState:
                 upstream_port=DEFAULT_UPSTREAM_PORT,
             )
         )
-        self.ai_node = DataPlaneController(
-            DataPlaneConfig(
-                role="ai_node",
-                label="AI 节点",
-                api_server=AI_NODE_API_SERVER,
-                ssh_target=AI_NODE_SSH_TARGET,
-                ssh_bin=AI_NODE_SSH_BIN,
-                ssh_options=AI_NODE_SSH_OPTIONS,
-                ssh_known_hosts_file=AI_NODE_SSH_KNOWN_HOSTS,
-                xray_bin=AI_NODE_XRAY_BIN,
-                docker_bin=AI_NODE_DOCKER_BIN,
-                container_name=AI_NODE_CONTAINER_NAME,
-                restart_command=AI_NODE_RESTART_COMMAND,
-                config_path=AI_NODE_CONFIG_PATH,
-                source_config_path=AI_NODE_CONFIG_OUT,
-                upstream_host=AI_NODE_PROBE_HOST,
+        configured_targets = AI_NODE_SSH_TARGETS or ((AI_NODE_SSH_TARGET,) if AI_NODE_SSH_TARGET else ())
+        configured_containers = AI_NODE_CONTAINER_NAMES or ((AI_NODE_CONTAINER_NAME,) if AI_NODE_CONTAINER_NAME else ())
+        configured_restart_commands = AI_NODE_RESTART_COMMANDS or ((AI_NODE_RESTART_COMMAND,) if AI_NODE_RESTART_COMMAND else ())
+        node_count = max(
+            len(configured_targets),
+            len(configured_containers),
+            len(configured_restart_commands),
+            len(AI_NODE_IDS),
+            len(AI_NODE_LABELS),
+            0,
+        )
+        if node_count:
+            targets = _expand_ai_node_values(configured_targets, node_count, "AI_NODE_SSH_TARGETS")
+            containers = _expand_ai_node_values(configured_containers, node_count, "AI_NODE_CONTAINER_NAMES")
+            restart_commands = _expand_ai_node_values(
+                configured_restart_commands,
+                node_count,
+                "AI_NODE_RESTART_COMMANDS",
             )
-        ) if (AI_NODE_SSH_TARGET or AI_NODE_CONTAINER_NAME) else None
+            labels = (
+                _expand_ai_node_values(AI_NODE_LABELS, node_count, "AI_NODE_LABELS")
+                if AI_NODE_LABELS
+                else tuple(f"AI 节点 {index + 1}" for index in range(node_count))
+            )
+            node_ids = (
+                _expand_ai_node_values(AI_NODE_IDS, node_count, "AI_NODE_IDS")
+                if AI_NODE_IDS
+                else tuple(f"node-{index + 1}" for index in range(node_count))
+            )
+            if len(set(node_ids)) != node_count:
+                raise ValueError("AI_NODE_IDS 不能包含重复值。")
+            api_servers = _expand_ai_node_values(
+                AI_NODE_API_SERVERS,
+                node_count,
+                "AI_NODE_API_SERVERS",
+                fallback=AI_NODE_API_SERVER,
+            )
+            config_paths = _expand_ai_node_values(
+                AI_NODE_CONFIG_PATHS,
+                node_count,
+                "AI_NODE_CONFIG_PATHS",
+                fallback=AI_NODE_CONFIG_PATH,
+            )
+            probe_hosts = _expand_ai_node_values(
+                AI_NODE_PROBE_HOSTS,
+                node_count,
+                "AI_NODE_PROBE_HOSTS",
+                fallback=AI_NODE_PROBE_HOST,
+            )
+            self.ai_nodes = {}
+            for index in range(node_count):
+                node_id = node_ids[index] if node_count > 1 or AI_NODE_LIST_CONFIGURED else "ai_node"
+                label = labels[index] if node_count > 1 or AI_NODE_LIST_CONFIGURED else "AI 节点"
+                self.ai_nodes[node_id] = DataPlaneController(
+                    DataPlaneConfig(
+                        role="ai_node",
+                        label=label,
+                        api_server=api_servers[index],
+                        ssh_target=targets[index],
+                        ssh_bin=AI_NODE_SSH_BIN,
+                        ssh_options=AI_NODE_SSH_OPTIONS,
+                        ssh_known_hosts_file=AI_NODE_SSH_KNOWN_HOSTS,
+                        xray_bin=AI_NODE_XRAY_BIN,
+                        docker_bin=AI_NODE_DOCKER_BIN,
+                        container_name=containers[index],
+                        restart_command=restart_commands[index],
+                        config_path=config_paths[index],
+                        source_config_path=None if AI_NODE_LIST_CONFIGURED else AI_NODE_CONFIG_OUT,
+                        upstream_host=probe_hosts[index],
+                    )
+                )
+        else:
+            self.ai_nodes = {}
+        self.ai_node = next(iter(self.ai_nodes.values()), None)
         self.dns_failover_manager = DnsFailoverManager(
             DnsFailoverConfig(
                 enabled=DNS_FAILOVER_ENABLED,

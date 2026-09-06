@@ -56,18 +56,26 @@ Fluent Bit 日志采集使用 `monitoring/fluent-bit/.env`，远端 Loki 使用 
 | 变量 | 说明 |
 | --- | --- |
 | `AI_NODE_SSH_TARGET` | 可选远端 AI 节点 SSH 目标；当前本机备用为空 |
+| `AI_NODE_SSH_TARGETS` | 多个远端 AI 节点 SSH 目标，按逗号或换行分隔；与 `AI_NODE_IDS`、`AI_NODE_LABELS` 按顺序对应 |
+| `AI_NODE_IDS` | 多节点稳定 ID，按逗号或换行分隔；用于逐节点重启 API 和界面定位 |
+| `AI_NODE_LABELS` | 多节点显示名，按逗号或换行分隔 |
 | `AI_NODE_SSH_BIN` | SSH 可执行文件；默认 `ssh` |
 | `AI_NODE_SSH_OPTIONS` | SSH 额外参数，按 shell words 解析；远端纳管使用内网直连和密码/键盘交互认证 |
 | `AI_NODE_SSH_KNOWN_HOSTS` | AI 节点主机密钥文件；默认 `/root/.ssh/known_hosts_ai` |
 | `AI_NODE_CONTAINER_NAME` | 本机 AI 备用 Xray 容器名；当前为 `xray-ai-node` |
+| `AI_NODE_CONTAINER_NAMES` | 多节点远端容器名，按顺序对应 SSH 目标 |
 | `AI_NODE_RESTART_COMMAND` | 自定义重启命令（优先于容器名） |
+| `AI_NODE_RESTART_COMMANDS` | 多节点自定义重启命令，按顺序对应；留空时使用容器名执行 `docker restart` |
 | `AI_NODE_CONFIG_PATH` | AI 节点真实宿主配置路径；显式留空会禁用配置上传 |
+| `AI_NODE_CONFIG_PATHS` | 多节点配置路径；当前多节点纳管建议留空，避免控制面配置覆盖独立节点配置 |
 | `AI_NODE_API_SERVER` | AI 节点 Socket 存活检查地址；本机 Docker 生产当前为 `redacted-ip-007:27166` |
+| `AI_NODE_API_SERVERS` | 多节点 Socket 存活检查地址，按顺序对应；支持远端回环地址，如 `127.0.0.1:27166` |
 | `AI_NODE_METRICS_URL` | 面板读取 AI Xray `/debug/vars` 的地址；本机默认 `http://redacted-ip-007:31097/debug/vars`，只允许回环或受控管理网 |
 | `AI_NODE_ACCESS_LOG_PATH` | AI access log 路径；默认 `/app/xray/logs/ai-access.log`，只供控制面做本机域名/端口分析 |
 | `AI_NODE_DESTINATION_WINDOW_SECONDS` | AI 域名/端口请求分析窗口，默认 `600` 秒 |
 | `AI_NODE_DESTINATION_MAX_LABELS` | 每次展开的高流量域名/端口 Top 数，默认 `50`，用于限制 Prometheus 标签基数 |
 | `AI_NODE_PROBE_HOST` | AI 节点可达性探测目标；当前为 `redacted-ip-004` |
+| `AI_NODE_PROBE_HOSTS` | 多节点探测目标，按顺序对应；仅用于需要生成分享地址的兼容场景 |
 
 节点备份默认请求普通数据面的配置、`.env`、运行时辅助文件和最新报告；远端部署根可用 `DB_BACKUP_DATAPLANE_DEPLOY_ROOT` / `DB_BACKUP_AI_NODE_DEPLOY_ROOT` 配置。节点备份清单和恢复命令见[节点备份完整性与快速恢复](node-recovery.md)。
 
@@ -221,6 +229,7 @@ SSH 采集的详细安全边界、`remote-node-collection.json` 字段和只读�
 ### AI 节点模式
 
 - `AI_NODE_SSH_TARGET` 生效后，AI 节点模式为 `ssh`；当前留空时由 `AI_NODE_CONTAINER_NAME=xray-ai-node` 使用本机 Docker 模式
+- 多节点使用 `AI_NODE_SSH_TARGETS`；面板按 `AI_NODE_IDS` / `AI_NODE_LABELS` 分别展示状态，并通过 `POST /api/ai-nodes/<node_id>/restart` 单独重启
 - `AI_NODE_CONFIG_PATH` 非空时控制面才具备上传 `config-ai-node.json` 的能力；生产当前显式留空以禁止上传
 - `AI_NODE_API_SERVER` 用于 AI 业务 Socket 状态检查；`AI_NODE_METRICS_URL` 用于读取仅回环开放的 Xray expvar 流量指标
 - AI 节点使用独立 REALITY 凭据，字段契约见 [AI 节点独立凭据](ai-node-credentials.md)

@@ -44,13 +44,21 @@ scrape_configs:
           node_role: normal_data_plane
           environment: production
           region: unknown
-      - targets: ["nat.qq.pw:27168"]
+      - targets: ["100.109.201.64:27168"]
         labels:
-          host: ai-data-plane
-          node_id: ai-01
+          host: ai-hawaii
+          node_id: ai-hawaii
           node_role: ai_data_plane
           environment: production
-          region: unknown
+          region: hawaii
+          component: node_exporter
+      - targets: ["100.87.76.6:9100"]
+        labels:
+          host: ai-taiwan
+          node_id: ai-taiwan
+          node_role: ai_data_plane
+          environment: production
+          region: taiwan
           component: node_exporter
 
   - job_name: data-plane-cadvisor
@@ -64,13 +72,23 @@ scrape_configs:
           environment: production
           region: unknown
           xray_container: xray-reality-local
-      - targets: ["nat.qq.pw:27169"]
+      - targets: ["100.109.201.64:27169"]
         labels:
-          host: ai-data-plane
-          node_id: ai-01
+          host: ai-hawaii
+          node_id: ai-hawaii
           node_role: ai_data_plane
           environment: production
-          region: unknown
+          region: hawaii
+          xray_container: xray
+          component: cadvisor
+      - targets: ["100.87.76.6:18081"]
+        labels:
+          host: ai-taiwan
+          node_id: ai-taiwan
+          node_role: ai_data_plane
+          environment: production
+          region: taiwan
+          xray_container: xray-ai-node
           component: cadvisor
 
   - job_name: control-plane-cadvisor
