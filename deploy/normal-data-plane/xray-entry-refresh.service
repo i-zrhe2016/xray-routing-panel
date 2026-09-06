@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh proxy aliases after Xray configuration changes
+After=xray-entry.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl reload-or-restart xray-entry.service
+ExecStart=/usr/bin/systemctl restart xray-legacy-forwarder.service

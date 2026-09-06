@@ -34,10 +34,29 @@ def parse_xray_client_profile():
     missing = [key for key, value in profile.items() if not value]
     if missing:
         return None, f"Xray 客户端配置缺少字段：{', '.join(missing)}"
+    if "panelSubscription" in payload:
+        metadata = payload["panelSubscription"]
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("users"), dict):
+            return None, "统一入口订阅配置无效"
+        try:
+            profile["unified_port"] = int(metadata["port"])
+            if not 1 <= profile["unified_port"] <= 65535:
+                raise ValueError("invalid port")
+        except (KeyError, TypeError, ValueError):
+            return None, "统一入口订阅端口无效"
+        profile["user_uuids"] = metadata["users"]
     return profile, ""
 
 
+def subscription_endpoint(profile, listen_port):
+    if profile.get("unified_port"):
+        # Missing/disabled accounts must never fall back to another user's ID.
+        return int(profile["unified_port"]), profile["user_uuids"][str(int(listen_port))]
+    return int(listen_port), profile["uuid"]
+
+
 def build_vless_share_link(profile, listen_port, note):
+    public_port, client_uuid = subscription_endpoint(profile, listen_port)
     params = urlencode(
         {
             "encryption": "none",
@@ -52,7 +71,7 @@ def build_vless_share_link(profile, listen_port, note):
         }
     )
     tag = quote(normalize_subscription_name(note, listen_port), safe="")
-    return f"vless://{profile['uuid']}@{profile['server']}:{int(listen_port)}?{params}#{tag}"
+    return f"vless://{client_uuid}@{profile['server']}:{public_port}?{params}#{tag}"
 
 
 def build_v2ray_subscription_content(profile, listen_port, note):
@@ -158,6 +177,7 @@ def _append_clash_rule_providers(lines):
 
 
 def build_clash_subscription_content(profile, listen_port, note):
+    public_port, client_uuid = subscription_endpoint(profile, listen_port)
     proxy_name = normalize_subscription_name(note, listen_port)
     lines = [
         "port: 7890",
@@ -182,8 +202,8 @@ def build_clash_subscription_content(profile, listen_port, note):
         f"  - name: {yaml_quote(proxy_name)}",
         "    type: vless",
         f"    server: {yaml_quote(profile['server'])}",
-        f"    port: {int(listen_port)}",
-        f"    uuid: {yaml_quote(profile['uuid'])}",
+        f"    port: {public_port}",
+        f"    uuid: {yaml_quote(client_uuid)}",
         "    udp: true",
         "    tls: true",
         "    network: tcp",
@@ -246,5 +266,6 @@ def build_port_access_payload(port, subscription_profile):
         base_url=PANEL_SUBSCRIPTION_PUBLIC_URL,
         subscription_token=port["subscription_token"],
     )
-    payload["share_link"] = build_vless_share_link(subscription_profile, port["listen_port"], port["note"])
+    if not subscription_profile.get("unified_port") or str(port["listen_port"]) in subscription_profile["user_uuids"]:
+        payload["share_link"] = build_vless_share_link(subscription_profile, port["listen_port"], port["note"])
     return payload

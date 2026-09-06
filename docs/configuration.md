@@ -155,6 +155,8 @@ SSH 采集的详细安全边界、`remote-node-collection.json` 字段和只读�
 
 - `XRAY_LISTEN_PORT`
 - `XRAY_PUBLIC_PORT`
+- `XRAY_UNIFIED_PORT`（启用统一 Clash 入口时设为 `443`）
+- `XRAY_UNIFIED_UUID_SECRET`（统一入口按原端口派生 UUID 的私有密钥，至少 32 字符）
 - `XRAY_API_SERVER`
 - `XRAY_NODE_TAG`
 - `XRAY_LOGLEVEL`

@@ -114,5 +114,5 @@ class LocalXrayModeTest(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         timeout_seconds, pattern = commands[0]
         self.assertEqual(timeout_seconds, int(os.environ.get("XRAY_STATS_QUERY_TIMEOUT", "5")))
-        self.assertEqual(pattern, "inbound>>>panel-")
+        self.assertEqual(pattern, ">>>panel-")
         self.assertEqual(state.data_plane.config.local_bin, os.environ["DATAPLANE_LOCAL_BIN"])

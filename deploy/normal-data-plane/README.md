@@ -1,5 +1,8 @@
 # Normal data-plane node
 
+For a shared Clash/HTTPS port 443 with legacy proxy aliases, see
+[the unified entry deployment procedure](../../docs/unified-entry.md).
+
 This directory contains the minimal Docker Compose definition used to run the
 normal Xray data plane on a replacement host. It intentionally does not run
 the control plane or the AI node.

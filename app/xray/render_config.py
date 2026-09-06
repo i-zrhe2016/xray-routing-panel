@@ -8,9 +8,11 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse
 
 from app.xray.config import BASE_DIR, REQUIRED_ENV_KEYS, RUNTIME_DIR
 from app.xray.envfile import load_env_file
+from app.xray.unified_entry import account_uuid, socket_path, unified_port
 
 
 def validate_env(values: dict[str, str]) -> None:
+    unified_port(values)
     missing = [key for key in REQUIRED_ENV_KEYS if not values.get(key)]
     if missing:
         raise ValueError(f"missing required values: {', '.join(missing)}")
@@ -259,8 +261,25 @@ def build_server_config(
     panel_ports: list[int] | None = None,
     relay_outbound: dict | None = None,
 ) -> dict:
+    entry_port = unified_port(values)
     panel_ports = list(panel_ports or [])
-    if panel_ports:
+    if entry_port:
+        if entry_port in panel_ports:
+            raise ValueError("The unified entry port cannot also identify a legacy account")
+        inbounds = [build_reality_inbound(values, port) for port in panel_ports]
+        entry = build_reality_inbound(values, entry_port)
+        entry["tag"] = f"unified-{entry_port}"
+        entry["settings"]["clients"] = [
+            {"id": account_uuid(values, port), "flow": values["XRAY_FLOW"],
+             "email": f"panel-user-{port}", "level": 1}
+            for port in panel_ports
+        ]
+        inbounds.append(entry)
+        for inbound in inbounds:
+            inbound["listen"] = socket_path(inbound["tag"])
+            inbound.pop("port")
+            inbound["streamSettings"]["sockopt"]["acceptProxyProtocol"] = True
+    elif panel_ports:
         inbounds = [build_reality_inbound(values, listen_port) for listen_port in panel_ports]
     else:
         inbounds = [build_reality_inbound(values, int(values["XRAY_LISTEN_PORT"]))]
@@ -291,6 +310,15 @@ def build_server_config(
             }
         )
 
+    policy = {
+        "system": {
+            "statsInboundUplink": True,
+            "statsInboundDownlink": True,
+        }
+    }
+    if entry_port:
+        policy["levels"] = {"1": {"statsUserUplink": True, "statsUserDownlink": True}}
+
     config = {
         "log": {
             "loglevel": values["XRAY_LOGLEVEL"],
@@ -303,12 +331,7 @@ def build_server_config(
             "services": ["StatsService", "HandlerService"],
         },
         "stats": {},
-        "policy": {
-            "system": {
-                "statsInboundUplink": True,
-                "statsInboundDownlink": True,
-            }
-        },
+        "policy": policy,
         "inbounds": inbounds,
         "outbounds": outbounds,
     }
@@ -388,16 +411,19 @@ def build_ai_node_config(values: dict[str, str]) -> dict:
 
 
 def resolve_public_port(values: dict[str, str]) -> int:
+    entry_port = unified_port(values)
+    if entry_port:
+        return entry_port
     public_port_value = values.get("XRAY_PUBLIC_PORT", "").strip()
     if public_port_value:
         return int(public_port_value)
     return int(values["XRAY_LISTEN_PORT"])
 
 
-def build_client_config(values: dict[str, str]) -> dict:
+def build_client_config(values: dict[str, str], panel_ports: list[int] | None = None) -> dict:
     public_port = resolve_public_port(values)
     stream_sockopt = build_stream_sockopt(values)
-    return {
+    config = {
         "log": {"loglevel": "warning"},
         "inbounds": [
             {
@@ -439,6 +465,15 @@ def build_client_config(values: dict[str, str]) -> dict:
             }
         ],
     }
+    if unified_port(values):
+        users = {str(port): account_uuid(values, port) for port in (panel_ports or [])}
+        config["panelSubscription"] = {"port": public_port, "users": users}
+        # The diagnostic client uses an active account, never an unrestricted
+        # shared credential on the unified entry. Empty account lists fail closed.
+        config["outbounds"][0]["settings"]["vnext"][0]["users"][0]["id"] = next(
+            iter(users.values()), "00000000-0000-4000-8000-000000000000"
+        )
+    return config
 
 
 def build_share_url(values: dict[str, str]) -> str:
@@ -516,7 +551,8 @@ def main() -> int:
         return 1
 
     write_json(Path(args.config_out), build_server_config(values, dynamic_payload, panel_ports))
-    write_json(Path(args.client_out), build_client_config(values))
+    client_config = build_client_config(values, panel_ports)
+    write_json(Path(args.client_out), client_config)
 
     if backup_config_out:
         # The backup node skips AI dynamic routing (which would re-add a
@@ -532,7 +568,9 @@ def main() -> int:
 
     share_path = Path(args.share_out)
     share_path.parent.mkdir(parents=True, exist_ok=True)
-    share_path.write_text(build_share_url(values) + "\n", encoding="utf-8")
+    share_values = dict(values)
+    share_values["XRAY_CLIENT_UUID"] = client_config["outbounds"][0]["settings"]["vnext"][0]["users"][0]["id"]
+    share_path.write_text(build_share_url(share_values) + "\n", encoding="utf-8")
     return 0
 
 

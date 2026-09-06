@@ -1,0 +1,20 @@
+[Unit]
+Description=Unified Clash and HTTPS entry (443 with legacy port aliases)
+After=network-online.target docker.service verge-sub.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+RuntimeDirectory=xray-entry
+EnvironmentFile=/etc/xray-entry.env
+ExecStartPre=/usr/bin/python3 /usr/local/lib/xray-entry/render_entry_gateway.py --config ${XRAY_ENTRY_CONFIG} --socket-dir ${XRAY_ENTRY_SOCKET_DIR} --output /run/xray-entry/haproxy.cfg
+ExecStart=/usr/sbin/haproxy -Ws -f /run/xray-entry/haproxy.cfg -p /run/xray-entry/haproxy.pid
+ExecReload=/usr/bin/python3 /usr/local/lib/xray-entry/render_entry_gateway.py --config ${XRAY_ENTRY_CONFIG} --socket-dir ${XRAY_ENTRY_SOCKET_DIR} --output /run/xray-entry/haproxy.cfg
+ExecReload=/bin/kill -USR2 $MAINPID
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

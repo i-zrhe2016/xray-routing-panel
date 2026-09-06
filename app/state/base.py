@@ -454,8 +454,14 @@ class CoreService:
                 changed += 1
         return changed + cleaned
     def persist_and_reload(self, conn, reload_xray):
-        previous_panel_ports = XRAY_PANEL_PORTS_PATH.read_text(encoding="utf-8") if XRAY_PANEL_PORTS_PATH.exists() else None
+        previous_panel_ports = (
+            XRAY_PANEL_PORTS_PATH.read_text(encoding="utf-8") if XRAY_PANEL_PORTS_PATH.exists() else None
+        )
         previous_config = XRAY_CONFIG_PATH.read_text(encoding="utf-8") if XRAY_CONFIG_PATH.exists() else None
+        subscription_paths = [XRAY_CLIENT_CONFIG_PATH, XRAY_CONFIG_PATH.parent / "client-share.txt"]
+        previous_subscriptions = {
+            path: path.read_bytes() if path.exists() else None for path in subscription_paths
+        }
         backup_config_path = XRAY_CONFIG_PATH.parent / "config-backup.json"
         previous_backup_config = (
             backup_config_path.read_text(encoding="utf-8") if backup_config_path.exists() else None
@@ -473,6 +479,11 @@ class CoreService:
             if reload_xray:
                 self._panel.restart_data_plane()
         except Exception:
+            for path, content in previous_subscriptions.items():
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(content)
             if previous_panel_ports is None:
                 XRAY_PANEL_PORTS_PATH.unlink(missing_ok=True)
             else:
@@ -781,7 +792,7 @@ class CoreService:
         try:
             completed = self._panel.data_plane.run_statsquery(
                 XRAY_STATS_QUERY_TIMEOUT,
-                "inbound>>>panel-",
+                ">>>panel-",
             )
             if completed is None:
                 return {}
@@ -795,13 +806,14 @@ class CoreService:
                 continue
             name = str(item.get("name") or "").strip()
             parts = name.split(">>>")
-            if len(parts) != 4 or parts[0] != "inbound" or parts[2] != "traffic":
+            if len(parts) != 4 or parts[0] not in {"inbound", "user"} or parts[2] != "traffic":
                 continue
             tag = parts[1]
-            if not tag.startswith("panel-"):
+            prefix = "panel-user-" if parts[0] == "user" else "panel-"
+            if not tag.startswith(prefix):
                 continue
             try:
-                listen_port = int(tag.removeprefix("panel-"))
+                listen_port = int(tag.removeprefix(prefix))
                 value = int(item.get("value", 0) or 0)
             except (TypeError, ValueError):
                 continue

@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch deployed Xray config for active port changes
+
+[Path]
+PathChanged=/root/xray-routing-panel/app/xray/runtime/config.json
+Unit=xray-entry-refresh.service
+
+[Install]
+WantedBy=multi-user.target

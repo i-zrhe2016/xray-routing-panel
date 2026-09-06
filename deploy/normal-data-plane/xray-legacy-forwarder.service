@@ -1,0 +1,16 @@
+[Unit]
+Description=Legacy proxy port aliases to the unified Clash entry
+After=network-online.target xray-reality-local.service xray-entry.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/xray-entry.env
+ExecStart=/usr/bin/python3 /usr/local/lib/xray-entry/legacy_entry_forwarder.py --config ${XRAY_ENTRY_CONFIG}
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

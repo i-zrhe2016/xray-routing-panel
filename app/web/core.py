@@ -803,6 +803,8 @@ def build_subscription_response(token, listen_port, output_format):
     port = state.get_port_subscription_record(listen_port)
     if port is None:
         abort(404)
+    if profile.get("unified_port") and str(listen_port) not in profile["user_uuids"]:
+        abort(404)
 
     if output_format == "v2ray":
         content = build_v2ray_subscription_content(profile, listen_port, port["note"])
@@ -829,6 +831,8 @@ def build_port_token_subscription_response(subscription_token, output_format):
 
     port = state.get_port_subscription_record_by_token(subscription_token)
     if port is None or port.get("status") != "active":
+        abort(404)
+    if profile.get("unified_port") and str(port["listen_port"]) not in profile["user_uuids"]:
         abort(404)
 
     if output_format == "v2ray":

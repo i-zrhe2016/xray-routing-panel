@@ -122,6 +122,11 @@ class TrafficService:
             return None
 
         tag = str(match.group("tag") or "").strip()
+        if tag.startswith("unified-"):
+            email = str(match.group("email") or "")
+            if not email.startswith("panel-user-"):
+                return None
+            tag = "panel-" + email.removeprefix("panel-user-")
         if not tag.startswith("panel-"):
             return None
 
