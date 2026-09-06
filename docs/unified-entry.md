@@ -45,6 +45,10 @@ AI 节点使用独立凭据和监听端口，不参与此迁移。
    配置。检查 443 当前所有使用者；本部署的 HTTPS 服务为 `verge-sub`。
 2. 安装 HAProxy（已验证 2.8 配置语法）。将 `scripts/render_entry_gateway.py`
    和 `scripts/run_subscription_backend.py` 安装至 `/usr/local/lib/xray-entry/`。
+   如果主机启用了 `ai-routing-panel-firewall.timer`，同时安装
+   `deploy/normal-data-plane/sync-ai-routing-panel-firewall.sh`；统一模式下 Xray
+   使用 Unix socket，防火墙必须从统一配置读取 443 和旧端口别名，不能只扫描
+   Xray 容器的 TCP 监听。
 3. 安装 `deploy/normal-data-plane/xray-entry.service`、
    `xray-legacy-forwarder.service`、`xray-entry-refresh.service` 和
    `xray-entry-refresh.path` 至 `/etc/systemd/system/`。配置 `/etc/xray-entry.env`：

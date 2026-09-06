@@ -7,6 +7,11 @@ This directory contains the minimal Docker Compose definition used to run the
 normal Xray data plane on a replacement host. It intentionally does not run
 the control plane or the AI node.
 
+When the host firewall is managed by `ai-routing-panel-firewall.timer`, install
+`sync-ai-routing-panel-firewall.sh` as the timer's synchronizer as well; it
+accounts for the Unix-socket Xray inbounds and the public HAProxy/legacy alias
+listeners used by the unified entry.
+
 The deployment directory on a node is expected to have this shape:
 
 ```text
