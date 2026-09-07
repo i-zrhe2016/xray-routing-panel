@@ -10,6 +10,12 @@ https://xray.zrhe2016.cc
 
 公网请求先经过 Cloudflare Access，再由 Nginx 反向代理到控制面本机服务 `redacted-ip-007:18080`。控制面原始端口不作为公网管理入口。
 
+控制面内网直连入口为：
+
+```text
+http://100.112.13.103:18080
+```
+
 ## 登录方式
 
 当前使用 Cloudflare Access **One-time PIN（Email OTP）**，不使用 Google 登录。
@@ -45,10 +51,10 @@ redacted-email-001 [at] example.invalid
 
 ## 源站安全边界
 
-- 控制面监听地址：`redacted-ip-007:18080`。
+- 控制面监听地址：`0.0.0.0:18080`；控制面 Tailscale 直连地址为 `100.112.13.103:18080`。
 - 公网 HTTPS 入口：Nginx `443`。
 - SSH `22`、Grafana `3001`、Prometheus `9090` 不属于本入口，保持独立管理。
-- 不要把 `18080` 重新暴露到公网，否则会形成 Cloudflare Access 绕过路径。
+- `18080` 用于控制面内网直连；公网管理仍应优先使用 Cloudflare Access 入口，避免绕过访问控制。
 - `/healthz` 是机器健康检查接口，不是管理入口。
 
 ## 排障
@@ -67,7 +73,7 @@ curl -I https://xray.zrhe2016.cc/
 ss -lntp | grep -E ':(443|18080)\\b'
 ```
 
-预期 `18080` 只显示 `redacted-ip-007:18080`，`443` 由 Nginx 监听。
+预期 `18080` 显示 `0.0.0.0:18080`，`443` 由 Nginx 监听。
 
 如果没有收到验证码：
 
