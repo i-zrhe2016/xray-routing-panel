@@ -158,13 +158,23 @@
             </div>
             <div class="info-tile">
               <span>配置变更</span>
-              <strong>{{ '已变更' if dashboard.report.config_changed else '无变化' }}</strong>
+              <strong>
+                {% if dashboard.report.config_retried %}
+                已重试应用
+                {% elif dashboard.report.config_changed %}
+                已变更
+                {% else %}
+                无变化
+                {% endif %}
+              </strong>
             </div>
             <div class="info-tile">
               <span>AI 目标</span>
               <strong>
-                {% if dashboard.report.ai_target %}
+                {% if dashboard.report.ai_target and dashboard.report.ai_target.upstream_host and dashboard.report.ai_target.upstream_port %}
                 {{ dashboard.report.ai_target.upstream_host }}:{{ dashboard.report.ai_target.upstream_port }}
+                {% elif dashboard.report.ai_target %}
+                不可用
                 {% else %}
                 暂无
                 {% endif %}

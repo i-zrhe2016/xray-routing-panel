@@ -17,6 +17,8 @@ data:
   DNS_FAILOVER_PEAK_START: "19:00"
   DNS_FAILOVER_PEAK_END: "23:00"
   DNS_FAILOVER_PEAK_TIMEZONE: ""
+  # The xray-reloader sidecar owns process restarts for the shared local Xray.
+  DATAPLANE_EXTERNAL_RELOADER_ENABLED: "1"
   DB_BACKUP_KEEP_DAYS: "7"
   DB_BACKUP_PREFIX: "xray-routing-panel"
   DB_BACKUP_BUNDLE_ENABLED: "1"

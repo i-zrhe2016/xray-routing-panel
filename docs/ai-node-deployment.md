@@ -45,7 +45,8 @@ AI 节点运行独立的 VLESS + REALITY Xray，接收主数据面转发的 AI �
 - `backup`：人工固定本机 Docker 备用 AI，备用不可达时同样停用动态 AI 路由；
 - `forced_fallback`：人工停用动态 AI 路由，AI 域名回到普通数据面 `freedom` 直出。
 
-控制台会展示两个候选的探测状态、当前选中节点和 `manual_mode`。人工切换写入控制面 `app_state`，并立即触发一轮管理器重算。
+控制台会展示两个候选的探测状态、当前选中节点和 `manual_mode`。人工切换先触发管理器应用目标模式，
+成功后才写入控制面 `app_state`；失败时保留旧模式。
 
 ## 当前本机部署
 

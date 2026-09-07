@@ -17,6 +17,7 @@ from app.xray.node_control import (
     DataPlaneController,
     build_temp_target_path,
 )
+from app.xray.operation_lock import exclusive_file_lock
 
 
 def load_state_module(temp_root):
@@ -293,8 +294,85 @@ class NodeControlTest(unittest.TestCase):
         self.assertEqual(config_path.read_text(encoding="utf-8"), previous_config)
         self.assertEqual(backup_config_path.read_text(encoding="utf-8"), previous_backup_config)
 
+    def test_external_reloader_commits_without_direct_restart_and_keeps_pending_marker(self):
+        os.environ["DATAPLANE_EXTERNAL_RELOADER_ENABLED"] = "1"
+        os.environ["CONTROL_PLANE_BACKUP_XRAY_ENABLED"] = "0"
+        state_module = load_state_module(self.root)
+        state = state_module.PanelState()
+        state.init_db()
+        state.render_xray_config = lambda: None
+        state.xray_config_test = lambda: None
+        state.restart_data_plane = mock.Mock(return_value=True)
+        pending = self.root / "xray" / "runtime" / "config.json.pending-apply"
+
+        with state.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state.persist_and_reload(conn, reload_xray=True)
+
+        self.assertFalse(state.restart_data_plane.called)
+        self.assertTrue(pending.exists())
+
+        # A maintenance write that deliberately skips reload must not erase a
+        # marker left for the external watcher.
+        with state.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state.persist_and_reload(conn, reload_xray=False)
+        self.assertTrue(pending.exists())
+
+    def test_maintenance_cleanup_skips_when_manager_holds_apply_lock(self):
+        state = load_state_module(self.root).PanelState()
+        state.init_db()
+        lock_path = state._ai_manager_apply_lock_path()
+
+        with exclusive_file_lock(lock_path):
+            self.assertEqual(state.disable_auto_stopped_ports(), 0)
+
+    def test_forced_fallback_uses_manager_and_restores_mode_on_failure(self):
+        os.environ["AI_ROUTING_ENABLED"] = "1"
+        state = load_state_module(self.root).PanelState()
+        state.init_db()
+        state.data_plane.is_configured = lambda: True
+        observed_modes = []
+
+        def apply_manager(requested_mode):
+            observed_modes.append((requested_mode, state.ai_routing.ai_routing_manual_state()["mode"]))
+
+        with mock.patch.object(state.ai_routing, "_trigger_ai_domain_manager", side_effect=apply_manager) as trigger:
+            state.set_ai_routing_manual_mode("forced_fallback")
+            trigger.assert_called_once_with("forced_fallback")
+        self.assertEqual(observed_modes, [("forced_fallback", "auto")])
+        self.assertEqual(state.ai_routing_manual_state()["mode"], "forced_fallback")
+        with (
+            mock.patch.object(state.ai_routing, "_trigger_ai_domain_manager", side_effect=RuntimeError("apply failed")),
+            self.assertRaisesRegex(RuntimeError, "apply failed"),
+        ):
+            state.set_ai_routing_manual_mode("auto")
+        self.assertEqual(state.ai_routing_manual_state()["mode"], "forced_fallback")
+
+    def test_manual_manager_can_run_locally_in_a_shared_pod(self):
+        os.environ["AI_DOMAIN_MANAGER_EXECUTION_MODE"] = "local"
+        state = load_state_module(self.root).PanelState()
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("app.state.ai_routing.subprocess.run", return_value=completed) as run:
+            state.ai_routing._trigger_ai_domain_manager("forced_fallback")
+
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command,
+            [
+                sys.executable,
+                "-m",
+                "app.xray.ai_domain_manager",
+                "--once",
+                "--manual-mode",
+                "forced_fallback",
+                "--manual-lock-held",
+            ],
+        )
+        self.assertEqual(run.call_args.kwargs["cwd"], str(Path(__file__).resolve().parents[1]))
+
     def test_config_failure_restores_database_files_and_running_nodes(self):
-        for failure in ("restart_false", "restart_timeout", "commit"):
+        for failure in ("restart_false", "restart_timeout", "commit", "backup_false", "backup_timeout"):
             for remote in (False, True):
                 with self.subTest(failure=failure, remote=remote):
                     os.environ["CONTROL_PLANE_BACKUP_XRAY_ENABLED"] = "1"
@@ -324,8 +402,13 @@ class NodeControlTest(unittest.TestCase):
                                 raise RuntimeError("synthetic restart timeout")
                         return True
 
-                    def restart_backup(running=running, paths=paths):
+                    def restart_backup(running=running, paths=paths, failure=failure):
                         running["backup"] = paths[2].read_text(encoding="utf-8")
+                        if running["backup"] == "new":
+                            if failure == "backup_false":
+                                return False
+                            if failure == "backup_timeout":
+                                raise RuntimeError("synthetic backup timeout")
                         return True
 
                     state.render_xray_config = render
@@ -351,7 +434,7 @@ class NodeControlTest(unittest.TestCase):
                         self.assertEqual(state.get_state(conn, "review_marker"), "old")
                     self.assertTrue(all(path.read_text(encoding="utf-8") == "old" for path in paths))
                     self.assertEqual(running, {"primary": "old", "backup": "old"})
-                    self.assertEqual(state.restart_data_plane.call_count, 2)
+                    self.assertEqual(state.restart_data_plane.call_count, 0 if failure.startswith("backup") else 2)
                     self.assertEqual(syncs, ["old"] if remote else [])
 
     def test_remote_sync_uses_unique_temp_config_with_json_suffix(self):
@@ -520,7 +603,9 @@ class NodeControlTest(unittest.TestCase):
 
         self.assertEqual(uploaded, ["/etc/xray/config.json", "/etc/xray/dynamic-routing.json"])
         self.assertEqual(remote_calls[-1][0][-1], "/etc/xray/dynamic-routing.json")
-        self.assertEqual(remote_calls[-1][1], source_dynamic.read_text(encoding="utf-8"))
+        self.assertIsNone(remote_calls[-1][1])
+        self.assertRegex(remote_calls[-2][0][-1], r"^/etc/xray/dynamic-routing\.codex-tmp-[0-9a-f]{32}\.json$")
+        self.assertEqual(remote_calls[-2][1], source_dynamic.read_text(encoding="utf-8"))
 
     def test_remote_generated_sync_deletes_missing_dynamic_routing_fragment(self):
         source_config = self.root / "config.json"
@@ -693,6 +778,7 @@ class NodeControlTest(unittest.TestCase):
                     "route_status": {
                         "status": "pending",
                         "reason": "classifier_disabled",
+                        "config_retried": True,
                         "pending_domains_without_classifier": [
                             "api.example.com",
                             "cdn.example.com",
@@ -707,6 +793,7 @@ class NodeControlTest(unittest.TestCase):
 
         self.assertEqual(report["route_status"], "pending")
         self.assertEqual(report["pending_domains_without_classifier"], 2)
+        self.assertTrue(report["config_retried"])
 
     def test_render_xray_config_pulls_remote_dynamic_routing_first(self):
         os.environ["DATAPLANE_SSH_TARGET"] = "root@default-node"

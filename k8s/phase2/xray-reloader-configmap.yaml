@@ -8,8 +8,10 @@ data:
     set -eu
 
     CONFIG_PATH="${XRAY_CONFIG_PATH:-/etc/xray/config.json}"
+    PENDING_PATH="${XRAY_PENDING_APPLY_PATH:-${CONFIG_PATH}.pending-apply}"
+    VALIDATE_BIN="${XRAY_VALIDATE_BIN:-/usr/local/bin/xray}"
     POLL_INTERVAL="${XRAY_POLL_INTERVAL_SECONDS:-2}"
-    LAST_CHECKSUM=""
+    WAIT_TIMEOUT="${XRAY_WAIT_TIMEOUT_SECONDS:-30}"
 
     current_checksum() {
       if [ ! -f "$CONFIG_PATH" ]; then
@@ -19,21 +21,78 @@ data:
       sha256sum "$CONFIG_PATH" | awk '{print $1}'
     }
 
-    restart_xray() {
-      PID="$(pidof xray || true)"
-      if [ -z "$PID" ]; then
-        return
-      fi
-      echo "[xray-reloader] config changed, restarting xray pid=$PID"
-      kill -TERM $PID || true
+    wait_for_pids_exit() {
+      PIDS="$1"
+      DEADLINE=$(( $(date +%s) + WAIT_TIMEOUT ))
+      while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+        ALIVE=0
+        for PID in $PIDS; do
+          if kill -0 "$PID" 2>/dev/null; then
+            ALIVE=1
+            break
+          fi
+        done
+        if [ "$ALIVE" -eq 0 ]; then
+          return 0
+        fi
+        sleep 1
+      done
+      return 1
     }
 
+    wait_for_xray_running() {
+      DEADLINE=$(( $(date +%s) + WAIT_TIMEOUT ))
+      while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+        if pidof xray >/dev/null 2>&1; then
+          return 0
+        fi
+        sleep 1
+      done
+      return 1
+    }
+
+    apply_config() {
+      if ! "$VALIDATE_BIN" run -test -config "$CONFIG_PATH"; then
+        echo "[xray-reloader] config validation failed; keeping pending marker" >&2
+        return 1
+      fi
+      PIDS="$(pidof xray || true)"
+      if [ -z "$PIDS" ]; then
+        echo "[xray-reloader] xray process not found; keeping pending marker" >&2
+        return 1
+      fi
+      echo "[xray-reloader] validated config, restarting xray pid=$PIDS"
+      kill -TERM $PIDS 2>/dev/null || true
+      if ! wait_for_pids_exit "$PIDS"; then
+        echo "[xray-reloader] old xray process did not exit; keeping pending marker" >&2
+        return 1
+      fi
+      if ! wait_for_xray_running; then
+        echo "[xray-reloader] replacement xray process did not start; keeping pending marker" >&2
+        return 1
+      fi
+      if ! rm -f "$PENDING_PATH"; then
+        echo "[xray-reloader] unable to clear pending marker; keeping it for retry" >&2
+        return 1
+      fi
+      return 0
+    }
+
+    LAST_CHECKSUM="$(current_checksum)"
     while true; do
       NEXT_CHECKSUM="$(current_checksum)"
-      if [ -n "$NEXT_CHECKSUM" ] && [ -n "$LAST_CHECKSUM" ] && [ "$NEXT_CHECKSUM" != "$LAST_CHECKSUM" ]; then
-        restart_xray
+      NEEDS_APPLY=0
+      if [ -f "$PENDING_PATH" ]; then
+        NEEDS_APPLY=1
+      elif [ -n "$NEXT_CHECKSUM" ] && [ "$NEXT_CHECKSUM" != "$LAST_CHECKSUM" ]; then
+        NEEDS_APPLY=1
       fi
-      if [ -n "$NEXT_CHECKSUM" ]; then
+
+      if [ "$NEEDS_APPLY" -eq 1 ]; then
+        if apply_config; then
+          LAST_CHECKSUM="$NEXT_CHECKSUM"
+        fi
+      elif [ -n "$NEXT_CHECKSUM" ]; then
         LAST_CHECKSUM="$NEXT_CHECKSUM"
       fi
       sleep "$POLL_INTERVAL"

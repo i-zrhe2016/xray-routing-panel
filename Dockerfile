@@ -12,6 +12,7 @@ RUN apt-get update \
         ca-certificates \
         docker-cli \
         openssh-client \
+        procps \
         tar \
         zstd \
     && rm -rf /var/lib/apt/lists/* \

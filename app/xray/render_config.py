@@ -8,6 +8,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse
 
 from app.xray.config import BASE_DIR, REQUIRED_ENV_KEYS, RUNTIME_DIR
 from app.xray.envfile import load_env_file
+from app.xray.file_io import write_text_atomic
 from app.xray.unified_entry import account_uuid, socket_path, unified_port
 
 
@@ -500,7 +501,7 @@ def build_share_url(values: dict[str, str]) -> str:
 
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_text_atomic(path, json.dumps(payload, indent=2, ensure_ascii=True) + "\n")
 
 
 def main() -> int:
@@ -570,7 +571,7 @@ def main() -> int:
     share_path.parent.mkdir(parents=True, exist_ok=True)
     share_values = dict(values)
     share_values["XRAY_CLIENT_UUID"] = client_config["outbounds"][0]["settings"]["vnext"][0]["users"][0]["id"]
-    share_path.write_text(build_share_url(share_values) + "\n", encoding="utf-8")
+    write_text_atomic(share_path, build_share_url(share_values) + "\n")
     return 0
 
 

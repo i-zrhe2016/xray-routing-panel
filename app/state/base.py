@@ -1,8 +1,10 @@
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 import time
+from pathlib import Path
 from urllib.parse import urlencode
 
 from ..config import (
@@ -11,6 +13,7 @@ from ..config import (
     CONTROL_PLANE_BACKUP_UPSTREAM_URL,
     CONTROL_PLANE_BACKUP_XRAY_ENABLED,
     DATAPLANE_CONFIG_PATH,
+    DATAPLANE_EXTERNAL_RELOADER_ENABLED,
     DATAPLANE_LOCAL_BIN,
     DATAPLANE_SSH_TARGET,
     DB_PATH,
@@ -39,6 +42,8 @@ from ..helpers import (
     utc_now,
 )
 from ..observability.logging import emit_business_event
+from ..xray.file_io import write_bytes_atomic, write_text_atomic
+from ..xray.operation_lock import LockBusyError, exclusive_file_lock
 from ..xray.envfile import load_env_file
 
 
@@ -389,29 +394,50 @@ class CoreService:
         if localized is None:
             return default
         return localized.strftime("%Y-%m-%d %H:%M:%S")
+    def _ai_manager_apply_lock_path(self):
+        configured = os.environ.get("AI_DOMAIN_MANAGER_LOCK_PATH", "").strip()
+        if configured:
+            return Path(configured)
+        return XRAY_CONFIG_PATH.with_name(".ai-domain-manager.lock")
+
+    @staticmethod
+    def _raise_apply_lock_busy(exc):
+        raise RuntimeError("配置正在应用，请稍后重试。") from exc
+
     def disable_auto_stopped_ports(self, reload_xray=True):
-        with self._panel.write_lock:
-            with self._panel.connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                changed = self._panel.disable_auto_stopped_ports_in_tx(conn)
-                if changed:
-                    self._panel.persist_and_reload(conn, reload_xray=reload_xray)
-                else:
-                    conn.commit()
-                return changed
+        try:
+            with exclusive_file_lock(self._ai_manager_apply_lock_path()):
+                with self._panel.write_lock:
+                    with self._panel.connect() as conn:
+                        conn.execute("BEGIN IMMEDIATE")
+                        changed = self._panel.disable_auto_stopped_ports_in_tx(conn)
+                        if changed:
+                            self._panel._persist_and_reload_locked(conn, reload_xray=reload_xray)
+                        else:
+                            conn.commit()
+                        return changed
+        except LockBusyError:
+            # Dashboard reads and the maintenance worker should remain
+            # available while the resident AI manager owns the apply lock. The
+            # next maintenance/dashboard cycle will retry the cleanup.
+            return 0
     def apply_mutation(self, operation):
-        with self._panel.write_lock:
-            self._panel.sync_traffic_state_locked()
-            with self._panel.connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    result = operation(conn)
-                    self._panel.disable_auto_stopped_ports_in_tx(conn)
-                    self._panel.persist_and_reload(conn, reload_xray=True)
-                    return result
-                except Exception:
-                    conn.rollback()
-                    raise
+        try:
+            with exclusive_file_lock(self._ai_manager_apply_lock_path()):
+                with self._panel.write_lock:
+                    self._panel.sync_traffic_state_locked()
+                    with self._panel.connect() as conn:
+                        conn.execute("BEGIN IMMEDIATE")
+                        try:
+                            result = operation(conn)
+                            self._panel.disable_auto_stopped_ports_in_tx(conn)
+                            self._panel._persist_and_reload_locked(conn, reload_xray=True)
+                            return result
+                        except Exception:
+                            conn.rollback()
+                            raise
+        except LockBusyError as exc:
+            self._raise_apply_lock_busy(exc)
     def apply_state_update(self, operation):
         with self._panel.write_lock:
             with self._panel.connect() as conn:
@@ -454,6 +480,13 @@ class CoreService:
                 changed += 1
         return changed + cleaned
     def persist_and_reload(self, conn, reload_xray):
+        try:
+            with exclusive_file_lock(self._ai_manager_apply_lock_path()):
+                return self._persist_and_reload_locked(conn, reload_xray)
+        except LockBusyError as exc:
+            self._raise_apply_lock_busy(exc)
+
+    def _persist_and_reload_locked(self, conn, reload_xray):
         previous_panel_ports = (
             XRAY_PANEL_PORTS_PATH.read_text(encoding="utf-8") if XRAY_PANEL_PORTS_PATH.exists() else None
         )
@@ -467,41 +500,58 @@ class CoreService:
             backup_config_path.read_text(encoding="utf-8") if backup_config_path.exists() else None
         )
         panel_ports_payload = self._panel.render_panel_ports_payload(conn)
-        backup_restarted = False
+        backup_restart_attempted = False
         data_plane_restart_attempted = False
+        pending_apply_path = XRAY_CONFIG_PATH.with_name(XRAY_CONFIG_PATH.name + ".pending-apply")
+        pending_apply_preexisting = pending_apply_path.exists()
+        pending_marker_created = False
         try:
             self._panel.write_json_file(XRAY_PANEL_PORTS_PATH, panel_ports_payload)
             self._panel.render_xray_config()
             self._panel.xray_config_test()
+            if reload_xray and DATAPLANE_EXTERNAL_RELOADER_ENABLED:
+                # Create the marker only after the complete config has been
+                # rendered and validated, so the watcher never restarts an
+                # old config merely because an apply is starting.
+                pending_apply_path.parent.mkdir(parents=True, exist_ok=True)
+                pending_apply_path.touch()
+                pending_marker_created = not pending_apply_preexisting
             if CONTROL_PLANE_BACKUP_XRAY_ENABLED:
+                backup_restart_attempted = True
                 if not self._panel.restart_backup_xray():
                     raise RuntimeError("控制面备用 Xray 重载失败，端口变更未提交。")
-                backup_restarted = True
-            if reload_xray:
+            # In external-reloader mode the sidecar validates, restarts, and
+            # removes the marker after the new process is observable. In direct
+            # mode the panel owns the restart itself.
+            if reload_xray and not DATAPLANE_EXTERNAL_RELOADER_ENABLED:
                 data_plane_restart_attempted = True
                 if not self._panel.restart_data_plane():
                     raise RuntimeError("数据面重载失败，端口变更未提交。")
+            if not DATAPLANE_EXTERNAL_RELOADER_ENABLED:
+                pending_apply_path.unlink(missing_ok=True)
             conn.commit()
         except Exception:
             conn.rollback()
+            if pending_marker_created and not DATAPLANE_EXTERNAL_RELOADER_ENABLED:
+                pending_apply_path.unlink(missing_ok=True)
             for path, content in previous_subscriptions.items():
                 if content is None:
                     path.unlink(missing_ok=True)
                 else:
-                    path.write_bytes(content)
+                    write_bytes_atomic(path, content)
             if previous_panel_ports is None:
                 XRAY_PANEL_PORTS_PATH.unlink(missing_ok=True)
             else:
-                XRAY_PANEL_PORTS_PATH.write_text(previous_panel_ports, encoding="utf-8")
+                write_text_atomic(XRAY_PANEL_PORTS_PATH, previous_panel_ports)
             if previous_config is None:
                 XRAY_CONFIG_PATH.unlink(missing_ok=True)
             else:
-                XRAY_CONFIG_PATH.write_text(previous_config, encoding="utf-8")
+                write_text_atomic(XRAY_CONFIG_PATH, previous_config)
             if previous_backup_config is None:
                 backup_config_path.unlink(missing_ok=True)
             else:
-                backup_config_path.write_text(previous_backup_config, encoding="utf-8")
-            if backup_restarted:
+                write_text_atomic(backup_config_path, previous_backup_config)
+            if backup_restart_attempted:
                 try:
                     if not self._panel.restart_backup_xray():
                         emit_business_event(
@@ -559,6 +609,13 @@ class CoreService:
             "ports": [int(row["listen_port"]) for row in rows],
         }
     def write_current_config(self):
+        try:
+            with exclusive_file_lock(self._ai_manager_apply_lock_path()):
+                return self._write_current_config_locked()
+        except LockBusyError as exc:
+            self._raise_apply_lock_busy(exc)
+
+    def _write_current_config_locked(self):
         with self._panel.connect() as conn:
             self._panel.write_json_file(XRAY_PANEL_PORTS_PATH, self._panel.render_panel_ports_payload(conn))
         self._panel.render_xray_config()
@@ -577,6 +634,10 @@ class CoreService:
             )
             return
 
+        if DATAPLANE_EXTERNAL_RELOADER_ENABLED:
+            # The external watcher owns process restarts. It observes the
+            # atomically rendered config (and pending marker when applicable).
+            return
         config_path = str(self._panel.data_plane.config.config_path or "")
         if config_path not in changed_paths or not self._panel.data_plane.supports_restart():
             return
@@ -602,7 +663,7 @@ class CoreService:
             )
     def write_json_file(self, path, payload):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        write_text_atomic(path, json.dumps(payload, indent=2, ensure_ascii=True) + "\n")
     def render_xray_config(self):
         try:
             self._panel.sync_data_plane_dynamic_routing()
@@ -843,14 +904,23 @@ class CoreService:
             return False
         if not self._panel.ai_nodes:
             return False
-        current_mode = self._panel.backup_xray_mode()
-        previous_mode = getattr(self._panel, "_last_backup_mode", None)
-        self._panel._last_backup_mode = current_mode
-        if previous_mode is not None and previous_mode == current_mode:
+        try:
+            with exclusive_file_lock(self._ai_manager_apply_lock_path()):
+                current_mode = self._panel.backup_xray_mode()
+                previous_mode = getattr(self._panel, "_last_backup_mode", None)
+                if previous_mode is not None and previous_mode == current_mode:
+                    return False
+                self._panel.render_xray_config()
+                if not self._panel.restart_backup_xray():
+                    raise RuntimeError("控制面备用 Xray 重载失败。")
+                # Only record the mode after both rendering and restart have
+                # succeeded; a failed maintenance attempt must be retried.
+                self._panel._last_backup_mode = current_mode
+                return True
+        except LockBusyError:
+            # The manager owns the same runtime files. Let the next maintenance
+            # cycle retry instead of treating a lock collision as a mode sync.
             return False
-        self._panel.render_xray_config()
-        self._panel.restart_backup_xray()
-        return True
     def restart_backup_xray(self):
         """Restart the local backup Xray container so it picks up the new config."""
         if not CONTROL_PLANE_BACKUP_XRAY_ENABLED:

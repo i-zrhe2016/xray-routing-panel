@@ -20,7 +20,9 @@ from urllib.parse import parse_qsl, unquote, urlparse
 from app.xray.config import BASE_DIR, DEFAULT_RENDER_MODULE
 from app.xray.envfile import load_env_file as shared_load_env_file
 from app.xray.envfile import read_env_or_file as shared_read_env_or_file
+from app.xray.file_io import write_text_atomic
 from app.xray.node_control import DataPlaneConfig, DataPlaneController, reality_handshake_probe
+from app.xray.operation_lock import LockBusyError, exclusive_file_lock
 
 
 TIMESTAMP_RE = re.compile(r"^(?P<date>\d{4}/\d{2}/\d{2}) (?P<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?) ")
@@ -32,6 +34,7 @@ UNSET_PROXY_PROTOCOL = "replace_me"
 SQLITE_BUSY_TIMEOUT_MS = 30000
 SQLITE_LOCK_RETRY_ATTEMPTS = 4
 SQLITE_LOCK_RETRY_DELAY_SECONDS = 0.25
+LOCK_BUSY_EXIT_CODE = 75
 FORCED_AI_ROUTE_DOMAIN_SUFFIXES = (
     # Keep Gemini's authenticated web session and API calls on the same AI
     # egress. Routing only gemini.google.com is insufficient because the web
@@ -242,7 +245,7 @@ def load_json(path, default):
 
 def save_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_text_atomic(path, json.dumps(payload, indent=2, ensure_ascii=True) + "\n")
 
 
 def normalize_log_state(state):
@@ -1274,15 +1277,23 @@ def probe_ai_upstream_candidate(candidate, timeout_seconds, probe_controller=Non
 
 
 def summarize_ai_target_candidate(candidate):
+    host = str(candidate.get("upstream_host", "")).strip()
+    port = candidate.get("upstream_port")
+    try:
+        port = int(port) if port is not None and str(port).strip() else None
+    except (TypeError, ValueError):
+        port = None
     summary = {
-        "upstream_host": candidate["upstream_host"],
-        "upstream_port": int(candidate["upstream_port"]),
         "candidate_type": candidate.get("candidate_type", "template"),
         "is_reachable": bool(candidate.get("is_reachable")),
         "failure_reason": str(candidate.get("failure_reason", "")).strip(),
         "checked_at": str(candidate.get("checked_at", "")).strip(),
         "probe_method": str(candidate.get("probe_method", "tcp")).strip() or "tcp",
     }
+    if host:
+        summary["upstream_host"] = host
+    if port:
+        summary["upstream_port"] = port
     if candidate.get("probe_management_error"):
         summary["probe_management_error"] = True
     label = str(candidate.get("candidate_label", "")).strip()
@@ -1292,6 +1303,16 @@ def summarize_ai_target_candidate(candidate):
 
 
 def summarize_ai_target_for_report(ai_target):
+    if ai_target.get("probe_status") == "manual_fallback":
+        candidates = ai_target.get("candidates", [])
+        if not isinstance(candidates, list):
+            candidates = []
+        return {
+            "probe_status": "manual_fallback",
+            "failure_reason": str(ai_target.get("failure_reason", "")).strip(),
+            "is_reachable": False,
+            "candidates": list(candidates),
+        }
     summary = summarize_ai_target_candidate(ai_target)
     for key in (
         "selected_index",
@@ -1307,7 +1328,8 @@ def summarize_ai_target_for_report(ai_target):
     failure_reason = str(ai_target.get("failure_reason", "")).strip()
     if failure_reason:
         summary["failure_reason"] = failure_reason
-    summary["candidates"] = list(ai_target.get("candidates", []))
+    candidates = ai_target.get("candidates", [])
+    summary["candidates"] = list(candidates) if isinstance(candidates, list) else []
     return summary
 
 
@@ -1574,11 +1596,17 @@ def build_domain_report(state, cutoff, now, decisions, ai_target, panel_target, 
             }
         if route_status_code == "applied":
             target = None
-            if isinstance(ai_target, dict) and ai_target.get("upstream_host"):
-                target = {
-                    "upstream_host": ai_target["upstream_host"],
-                    "upstream_port": int(ai_target["upstream_port"]),
-                }
+            if isinstance(ai_target, dict):
+                target_host = str(ai_target.get("upstream_host", "")).strip()
+                try:
+                    target_port = int(ai_target.get("upstream_port"))
+                except (TypeError, ValueError):
+                    target_port = None
+                if target_host and target_port:
+                    target = {
+                        "upstream_host": target_host,
+                        "upstream_port": target_port,
+                    }
             return {
                 "outbound_tag": "ai_proxy",
                 "path": "ai_node",
@@ -1665,7 +1693,7 @@ def build_domain_report(state, cutoff, now, decisions, ai_target, panel_target, 
             {"protocol": protocol, "hits": hits}
             for protocol, hits in sorted(protocols.items())
         ],
-        "ai_target": summarize_ai_target_for_report(ai_target) if ai_target else None,
+        "ai_target": summarize_ai_target_for_report(ai_target) if isinstance(ai_target, dict) else None,
         "panel_target": panel_target,
         "route_status": route_status,
     }
@@ -1682,8 +1710,8 @@ def write_domain_report(output_dir, report):
     history_txt = history_dir / f"{stamp}.txt"
 
     payload = json.dumps(report, indent=2, ensure_ascii=True) + "\n"
-    latest_json.write_text(payload, encoding="utf-8")
-    history_json.write_text(payload, encoding="utf-8")
+    write_text_atomic(latest_json, payload)
+    write_text_atomic(history_json, payload)
 
     lines = [
         f"generated_at: {report['generated_at']}",
@@ -1693,6 +1721,10 @@ def write_domain_report(output_dir, report):
         f"ai_domains: {len(report['ai_domains'])}",
         f"route_status: {report['route_status'].get('status', 'unknown')}",
     ]
+    if report["route_status"].get("config_retried"):
+        lines.append("config_retried: true")
+    if report["route_status"].get("config_apply_status"):
+        lines.append(f"config_apply_status: {report['route_status']['config_apply_status']}")
     if report.get("panel_db_status"):
         lines.append(
             "panel_db_status: "
@@ -1701,27 +1733,42 @@ def write_domain_report(output_dir, report):
             f"observations={report['panel_db_status'].get('observations_upserted', 0)})"
         )
     if report.get("ai_target"):
-        lines.append(
-            "ai_target: "
-            f"{report['ai_target']['upstream_host']}:{report['ai_target']['upstream_port']}"
-        )
-        if report["ai_target"].get("candidate_count", 0) > 1:
-            lines.append(
-                "ai_target_selection: "
-                f"{report['ai_target']['selected_number']}/{report['ai_target']['candidate_count']} "
-                f"({'fallback' if report['ai_target'].get('failover_active') else 'primary'})"
-            )
-        if report["ai_target"].get("probe_status"):
-            lines.append(f"ai_target_probe_status: {report['ai_target']['probe_status']}")
-        candidates = report["ai_target"].get("candidates", [])
-        if candidates:
-            lines.append(
-                "ai_target_candidates: "
-                + ", ".join(
-                    f"{item['upstream_host']}:{item['upstream_port']}({'ok' if item['is_reachable'] else 'down'})"
-                    for item in candidates
+        target = report["ai_target"]
+        if not isinstance(target, dict):
+            lines.append("ai_target: unavailable")
+        else:
+            target_host = str(target.get("upstream_host", "")).strip()
+            target_port = target.get("upstream_port")
+            if target_host and target_port:
+                lines.append(f"ai_target: {target_host}:{target_port}")
+            else:
+                lines.append("ai_target: unavailable")
+            try:
+                candidate_count = int(target.get("candidate_count", 0) or 0)
+            except (TypeError, ValueError):
+                candidate_count = 0
+            if candidate_count > 1:
+                lines.append(
+                    "ai_target_selection: "
+                    f"{target.get('selected_number', '?')}/{candidate_count} "
+                    f"({'fallback' if target.get('failover_active') else 'primary'})"
                 )
-            )
+            if target.get("probe_status"):
+                lines.append(f"ai_target_probe_status: {target['probe_status']}")
+            candidates = target.get("candidates", [])
+            if candidates:
+                candidate_lines = []
+                for item in candidates:
+                    if not isinstance(item, dict):
+                        continue
+                    host = str(item.get("upstream_host", "")).strip()
+                    port = item.get("upstream_port")
+                    if host and port:
+                        candidate_lines.append(
+                            f"{host}:{port}({'ok' if item.get('is_reachable') else 'down'})"
+                        )
+                if candidate_lines:
+                    lines.append("ai_target_candidates: " + ", ".join(candidate_lines))
     if report["panel_target"]:
         lines.append(
             "panel_target: "
@@ -1740,8 +1787,8 @@ def write_domain_report(output_dir, report):
     else:
         lines.append("no domains observed in the last window")
     text = "\n".join(lines) + "\n"
-    latest_txt.write_text(text, encoding="utf-8")
-    history_txt.write_text(text, encoding="utf-8")
+    write_text_atomic(latest_txt, text)
+    write_text_atomic(history_txt, text)
 
 
 def rerender_config(render_script, env_file, config_out, client_out, share_out, dynamic_routing_file):
@@ -1808,9 +1855,14 @@ def restart_xray_command(command, timeout_seconds):
 def build_data_plane_controller(args):
     upstream_host = ""
     upstream_port = None
-    if getattr(args, "ai_upstream_candidates", None):
-        upstream_host = str(args.ai_upstream_candidates[0]["upstream_host"])
-        upstream_port = int(args.ai_upstream_candidates[0]["upstream_port"])
+    candidates = getattr(args, "ai_upstream_candidates", None)
+    first_candidate = candidates[0] if isinstance(candidates, (list, tuple)) and candidates else {}
+    if isinstance(first_candidate, dict):
+        upstream_host = str(first_candidate.get("upstream_host", "")).strip()
+        try:
+            upstream_port = int(first_candidate.get("upstream_port"))
+        except (TypeError, ValueError):
+            upstream_port = None
     access_log_path = str(getattr(args, "data_plane_access_log_path", "") or "").strip()
     if not access_log_path and args.data_plane_ssh_target and args.data_plane_config_path:
         config_path = Path(args.data_plane_config_path)
@@ -1934,7 +1986,45 @@ def classify_pending_domains(decisions, decisions_path, observed_domains, args):
     return unresolved
 
 
+def _resolve_lock_path(args, attribute, default_name):
+    configured = getattr(args, attribute, None)
+    if isinstance(configured, (str, os.PathLike)) and str(configured).strip():
+        return Path(configured)
+    return Path(args.config_out).with_name(default_name)
+
+
 def run_once(args):
+    """Run one apply cycle while excluding every other manager process."""
+
+    lock_path = _resolve_lock_path(args, "apply_lock_path", ".ai-domain-manager.lock")
+    manual_mode_override = getattr(args, "manual_mode", None)
+    has_manual_override = isinstance(manual_mode_override, str) and bool(manual_mode_override.strip())
+    manual_lock_held = getattr(args, "manual_lock_held", False)
+    if not isinstance(manual_lock_held, bool):
+        manual_lock_held = False
+    if has_manual_override:
+        if manual_lock_held:
+            # The panel holds the manual-operation gate while it waits for this
+            # one-shot process and commits the resulting mode.  Acquiring only
+            # the apply lock here avoids trying to lock the same gate twice.
+            with exclusive_file_lock(lock_path):
+                return _run_once_locked(args)
+        # Direct CLI callers that provide an override still need the same gate
+        # as scheduled runs; only the panel can explicitly declare ownership.
+        manual_lock_path = _resolve_lock_path(args, "manual_lock_path", ".ai-domain-manager-manual.lock")
+        with exclusive_file_lock(manual_lock_path), exclusive_file_lock(lock_path):
+            return _run_once_locked(args)
+
+    manual_lock_path = _resolve_lock_path(args, "manual_lock_path", ".ai-domain-manager-manual.lock")
+    # Scheduled runs take the manual-operation gate first, then the shared
+    # apply lock.  A panel request takes the same gate before starting its
+    # one-shot child, so no scheduled run can observe an intermediate mode or
+    # overwrite the config between apply and the panel's state commit.
+    with exclusive_file_lock(manual_lock_path), exclusive_file_lock(lock_path):
+        return _run_once_locked(args)
+
+
+def _run_once_locked(args):
     now = utc_now()
     data_plane_controller = build_data_plane_controller(args)
     log_state = load_log_state(args.log_state_path)
@@ -1951,7 +2041,10 @@ def run_once(args):
     observed_domains = {item["domain"] for item in log_state["events"]}
     sync_builtin_domain_decisions(decisions, args.classification_state_path, observed_domains)
     panel_target = read_panel_target(args.panel_db_path, args.panel_route_listen_port)
-    manual_mode = read_ai_routing_manual_mode(args.panel_db_path)
+    manual_mode_override = getattr(args, "manual_mode", None)
+    if not isinstance(manual_mode_override, str):
+        manual_mode_override = ""
+    manual_mode = manual_mode_override.strip().lower() or read_ai_routing_manual_mode(args.panel_db_path)
     if manual_mode == "forced_fallback":
         ai_target = {
             "probe_status": "manual_fallback",
@@ -1976,12 +2069,18 @@ def run_once(args):
         )
     route_status = {"status": "disabled", "reason": ""}
 
-    pending_without_classifier = classify_pending_domains(
-        decisions,
-        args.classification_state_path,
-        observed_domains,
-        args,
-    )
+    if manual_mode == "forced_fallback":
+        # The emergency path must not wait on Codex/OpenAI classification.  A
+        # direct config render and reload is safer than retaining the previous
+        # AI route while a remote classifier is unavailable.
+        pending_without_classifier = []
+    else:
+        pending_without_classifier = classify_pending_domains(
+            decisions,
+            args.classification_state_path,
+            observed_domains,
+            args,
+        )
 
     ai_domains = sorted(
         domain
@@ -2017,23 +2116,63 @@ def run_once(args):
                     "status": "applied" if applied else "disabled",
                     "reason": proxy_error if applied else "no_ai_domains",
                 }
+    elif manual_mode == "forced_fallback":
+        args.dynamic_routing_path.unlink(missing_ok=True)
+        route_status = {"status": "manual_fallback", "reason": "manual_override"}
     else:
         args.dynamic_routing_path.unlink(missing_ok=True)
         route_status = {"status": "idle", "reason": "no_ai_domains"}
 
     previous_config = args.config_out.read_text(encoding="utf-8") if args.config_out.is_file() else ""
-    rerender_config(
-        args.render_script,
-        args.env_file,
-        args.config_out,
-        args.client_out,
-        args.share_out,
-        args.dynamic_routing_path,
-    )
+    pending_apply_path = args.config_out.with_name(args.config_out.name + ".pending-apply")
+    pending_apply = pending_apply_path.exists()
+    pending_apply_path.parent.mkdir(parents=True, exist_ok=True)
+    # The marker means that a complete, rendered configuration is ready for a
+    # restart. Creating it before rendering lets an external watcher consume
+    # the old configuration if rendering fails in the middle of a cycle.
+    # Keep an existing marker for a previous failed apply, and only create a
+    # new one after the renderer has returned successfully.
+    try:
+        rerender_config(
+            args.render_script,
+            args.env_file,
+            args.config_out,
+            args.client_out,
+            args.share_out,
+            args.dynamic_routing_path,
+        )
+    except Exception:
+        # Rendering is expected to use atomic artifact writes. If a custom
+        # renderer nevertheless replaced the config before failing, preserve
+        # a retry signal for the external watcher; otherwise an existing
+        # marker remains untouched for the next manager cycle.
+        current_config = args.config_out.read_text(encoding="utf-8") if args.config_out.is_file() else ""
+        if not pending_apply and current_config != previous_config:
+            pending_apply_path.touch()
+        raise
     current_config = args.config_out.read_text(encoding="utf-8") if args.config_out.is_file() else ""
     config_changed = current_config != previous_config
+    config_retried = pending_apply
+    if config_changed or pending_apply:
+        # The local render is complete, so a marker created here is safe for
+        # an external watcher to consume even if a later remote sync/restart
+        # step fails.
+        pending_apply_path.touch()
     remote_config_changed = False
-    if data_plane_controller.is_configured():
+    config_apply_status = "not_needed"
+    apply_needed = config_changed or pending_apply
+    external_reloader_enabled = getattr(args, "data_plane_external_reloader_enabled", False)
+    if not isinstance(external_reloader_enabled, bool):
+        external_reloader_enabled = False
+    # An unmanaged controller may still carry the AI upstream address for
+    # reachability probes. That address is not a restart mechanism: without an
+    # explicit external watcher, classify the apply as unmanaged instead of
+    # raising a reload failure that can never be recovered by this process.
+    managed_data_plane = data_plane_controller.is_configured() and (
+        getattr(data_plane_controller, "mode", "") != "unmanaged"
+        or external_reloader_enabled
+    )
+    if managed_data_plane:
         # Sync on every management cycle. The rendered config can be unchanged
         # while the remote source fragment was deleted or replaced manually;
         # keeping both artifacts synchronized makes the next panel render safe.
@@ -2041,28 +2180,88 @@ def run_once(args):
         if data_plane_controller.supports_sync():
             synced_paths = data_plane_controller.sync_generated_files(validate_config=True)
             remote_config_path = str(getattr(args, "data_plane_config_path", "") or "").strip()
-            remote_config_changed = bool(remote_config_path and remote_config_path in {str(path) for path in synced_paths})
-        if (config_changed or remote_config_changed) and data_plane_controller.supports_restart():
-            data_plane_controller.restart()
-    elif config_changed and args.restart_command:
+            remote_config_changed = bool(
+                remote_config_path and remote_config_path in {str(path) for path in synced_paths}
+            )
+        apply_needed = config_changed or remote_config_changed or pending_apply
+        if apply_needed:
+            pending_apply_path.touch()
+        if apply_needed and external_reloader_enabled:
+            # Explicit external-reloader mode (for example Kubernetes' xray-
+            # reloader sidecar) owns the process restart.  The rendered files
+            # are delegated to that watcher instead of requiring a direct
+            # restart command from the manager.
+            config_apply_status = "delegated"
+        elif apply_needed and (
+            not data_plane_controller.supports_restart() or not data_plane_controller.restart()
+        ):
+            raise RuntimeError("AI 路由配置重载失败，保留待应用状态以便重试。")
+        elif apply_needed:
+            config_apply_status = "direct"
+        else:
+            config_apply_status = "unchanged"
+        if config_apply_status != "delegated":
+            pending_apply_path.unlink(missing_ok=True)
+    elif (config_changed or pending_apply) and args.restart_command and not external_reloader_enabled:
         restart_xray_command(args.restart_command, args.docker_timeout_seconds)
-    elif config_changed and args.restart_container_name:
+        config_apply_status = "direct"
+        pending_apply_path.unlink(missing_ok=True)
+    elif (config_changed or pending_apply) and args.restart_container_name and not external_reloader_enabled:
         restart_xray_container(args.restart_container_name, args.docker_timeout_seconds)
+        config_apply_status = "direct"
+        pending_apply_path.unlink(missing_ok=True)
+    elif apply_needed:
+        if external_reloader_enabled:
+            # An explicitly enabled watcher remains the sole restart owner,
+            # even when the controller has no local/remote management mode.
+            config_apply_status = "delegated"
+        else:
+            config_apply_status = "unmanaged"
+        if config_apply_status == "unmanaged" and manual_mode_override.strip():
+            raise RuntimeError("AI 路由配置重载未配置，保留待应用状态以便重试。")
+        if config_apply_status != "delegated":
+            pending_apply_path.unlink(missing_ok=True)
 
-    report = build_domain_report(log_state, cutoff, now, decisions, ai_target, panel_target, route_status)
-    if pending_without_classifier:
-        report["route_status"]["pending_domains_without_classifier"] = pending_without_classifier
-    report["route_status"]["config_changed"] = config_changed or remote_config_changed
-    report["panel_db_status"] = save_ai_domains_to_panel_db(args.panel_db_path, report, decisions)
-    write_domain_report(args.report_output_dir, report)
-    save_log_state(args.log_state_path, log_state)
-    save_json(args.classification_state_path, decisions)
-    print(
-        "[ai_domain_manager] "
-        f"domains={report['unique_domains']} ai_domains={len(report['ai_domains'])} "
-        f"route_status={report['route_status']['status']}",
-        flush=True,
-    )
+    # Once the config has been synchronized and the reload has succeeded (or
+    # been delegated to an external watcher), reporting is bookkeeping.  A
+    # report/database write failure must not make the panel roll back a mode
+    # that is already active on the data plane.
+    try:
+        report = build_domain_report(log_state, cutoff, now, decisions, ai_target, panel_target, route_status)
+        if pending_without_classifier:
+            report["route_status"]["pending_domains_without_classifier"] = pending_without_classifier
+        report["route_status"]["config_changed"] = config_changed or remote_config_changed
+        report["route_status"]["config_retried"] = config_retried
+        report["route_status"]["config_apply_status"] = config_apply_status
+        report["panel_db_status"] = save_ai_domains_to_panel_db(args.panel_db_path, report, decisions)
+        write_domain_report(args.report_output_dir, report)
+        save_log_state(args.log_state_path, log_state)
+        save_json(args.classification_state_path, decisions)
+        print(
+            "[ai_domain_manager] "
+            f"domains={report['unique_domains']} ai_domains={len(report['ai_domains'])} "
+            f"route_status={report['route_status']['status']}",
+            flush=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - reporting must not undo a successful config apply
+        print(
+            "[ai_domain_manager] config applied but report persistence failed: "
+            f"{exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {
+            "status": "applied_with_reporting_error",
+            "config_apply_status": config_apply_status,
+            "config_changed": config_changed or remote_config_changed,
+            "config_retried": config_retried,
+        }
+    return {
+        "status": "applied",
+        "config_apply_status": config_apply_status,
+        "config_changed": config_changed or remote_config_changed,
+        "config_retried": config_retried,
+    }
 
 
 def seconds_until_next_boundary(interval_seconds):
@@ -2082,6 +2281,13 @@ def build_args():
     parser.add_argument("--codex-timeout-seconds", type=int, default=env_int("CODEX_TIMEOUT_SECONDS", 180))
     parser.add_argument("--docker-timeout-seconds", type=int, default=env_int("DOCKER_TIMEOUT_SECONDS", 30))
     parser.add_argument("--panel-route-listen-port", type=int, default=env_int("PANEL_ROUTE_LISTEN_PORT", 0))
+    parser.add_argument(
+        "--manual-mode",
+        choices=("auto", "primary", "backup", "forced_fallback"),
+        default="",
+        help="Apply this mode for a one-shot request without reading the panel state.",
+    )
+    parser.add_argument("--manual-lock-held", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     workspace = Path(args.workspace_dir)
@@ -2101,6 +2307,18 @@ def build_args():
         or DEFAULT_RENDER_MODULE
     )
     args.config_out = Path(os.environ.get("XRAY_CONFIG_OUT", str(workspace / "runtime" / "config.json")))
+    args.apply_lock_path = Path(
+        os.environ.get(
+            "AI_DOMAIN_MANAGER_LOCK_PATH",
+            str(args.config_out.with_name(".ai-domain-manager.lock")),
+        )
+    )
+    args.manual_lock_path = Path(
+        os.environ.get(
+            "AI_DOMAIN_MANAGER_MANUAL_LOCK_PATH",
+            str(args.config_out.with_name(".ai-domain-manager-manual.lock")),
+        )
+    )
     args.client_out = Path(os.environ.get("XRAY_CLIENT_OUT", str(workspace / "runtime" / "client-test.json")))
     args.share_out = Path(os.environ.get("XRAY_SHARE_OUT", str(workspace / "runtime" / "client-share.txt")))
     args.panel_db_path = Path(os.environ.get("PANEL_DB_PATH", "/panel-data/panel.db"))
@@ -2129,6 +2347,7 @@ def build_args():
     args.data_plane_config_path = os.environ.get("DATAPLANE_CONFIG_PATH", "").strip()
     args.data_plane_dynamic_routing_path = os.environ.get("DATAPLANE_DYNAMIC_ROUTING_PATH", "").strip()
     args.data_plane_access_log_path = os.environ.get("DATAPLANE_ACCESS_LOG_PATH", "").strip()
+    args.data_plane_external_reloader_enabled = env_bool("DATAPLANE_EXTERNAL_RELOADER_ENABLED", "0")
     args.codex_classifier_enabled = env_bool("CODEX_CLASSIFIER_ENABLED", "1")
     args.codex_source_home = Path(os.environ.get("CODEX_SOURCE_HOME", "/host-codex-home"))
     args.codex_runtime_home = Path(
@@ -2194,6 +2413,10 @@ def main():
     while True:
         try:
             run_once(args)
+        except LockBusyError as exc:
+            print(f"[ai_domain_manager] busy: {exc}", file=sys.stderr, flush=True)
+            if args.once:
+                return LOCK_BUSY_EXIT_CODE
         except Exception as exc:
             print(f"[ai_domain_manager] error: {exc}", file=sys.stderr, flush=True)
             if args.once:

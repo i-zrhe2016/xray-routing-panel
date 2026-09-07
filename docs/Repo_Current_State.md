@@ -4,34 +4,39 @@ Last verified: 2026-09-07 @ working tree
 
 ## Current Focus
 
-- 核心审查发现的订阅到期与配置事务一致性修复；代码和回归验证已完成，尚未部署。
+- AI 路由主要 review findings 已修复并部署到控制面 Docker Compose；K3s 完整栈仍未部署。
 
 ## Implemented
 
-- 商业订阅到期后自动停用并触发配置更新，保留服务记录与订阅凭据供续费；不影响其他有效账号。
-- 数据面重载返回失败时阻止业务提交；数据库提交异常进入配置补偿路径。
-- 失败时恢复原配置，并对已尝试重载的数据面重新加载原配置；远端同步或回滚重载失败记录 `node.data_plane.rollback_failed`。
-- 维护规则及补偿边界见 [运维与排障](operations.md#自动维护规则)。
+- 面板、商业履约、维护任务与 AI 域名管理器共用跨进程应用锁，避免 SQLite/运行时配置锁顺序反转。
+- Xray 配置、动态路由、订阅、AI 决策和报告使用原子写入；远端生成文件通过唯一临时文件校验后替换。
+- Kubernetes 外部 reloader 校验配置、等待旧进程退出和新进程出现，失败保留待应用标记并重试；面板在该模式不直接重启数据面。
+- Kubernetes 面板挂载共享报告目录；Compose 注入管理器执行模式、共享数据库路径和外部 reloader 开关。
+- 强制回退报告不再假设上游 host/port；未管理数据面报告为 `unmanaged`，不执行不存在的重启。
 
 ## In Progress
 
-- None（本次修复的实现和本地验证已完成）。
+- None
 
 ## Known Issues / Failing Checks
 
-- 完整测试集为 226 passed、1 skipped；真实传输测试需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy，当前未验证真实节点行为。
-- 涉及文件存在既有 Ruff 告警，本次修改未新增；固定版本 Werkzeug 在 Python 3.12 下产生弃用警告。
+- 受影响定向回归通过：管理器、节点控制、商业履约共 68 项；本地 Xray、节点恢复、备用周期和渲染共 29 项。`py_compile`、Compose 配置、Kubernetes YAML 和 reloader shell 语法检查通过。
+- 全量 `unittest discover` 在当前容器不干净：6 个 pytest 测试因镜像未安装 pytest 无法导入，另有 Google/本地 socket/管理员凭据相关环境失败；需在完整 CI 凭据与依赖环境复核。
+- Open Code Review CLI preview 可生成变更清单，但实际 review 因未配置 `OCR_LLM_URL/OCR_LLM_TOKEN/OCR_LLM_MODEL`（或等效 Anthropic 配置）未执行。
+- 当前控制面的 `xray-routing-panel` 已重建并健康运行，`/healthz` 返回 `ok=true`；本次未启动 Compose 的 Xray profile。
+- 尚未在 K3s 节点验证 sidecar 实际滚动重载；K3s 运行状态为 Unverified。
 
 ## Constraints
 
-- Python >=3.10，Flask 固定为 2.2.5；依赖定义见 `pyproject.toml`。
-- 本地测试模拟节点和失败条件，不能代表生产部署验收；生产运行状态为 Unverified。
+- Python >=3.10，Flask 固定为 2.2.5；SQLite 部署保持单副本。
+- 外部 reloader 模式要求共享运行卷、`shareProcessNamespace`、面板镜像中的 Xray/procps，以及共享 `/var/log/xray`。
 
 ## Architecture Snapshot
 
-- Flask 控制面通过 `app/state/` 业务服务管理 SQLite 状态，`app/xray/node_control.py` 负责数据面操作。
-- 普通数据面承载代理流量，AI 路由子系统维护 AI 上游选择；模块介绍见 [架构说明](architecture.md)，其中生产拓扑未在本次核实。
+- Flask 控制面通过 `app/state/` 服务管理 SQLite，`app/xray/node_control.py` 管理本地、Docker 或 SSH 数据面。
+- AI 管理器与面板通过运行时目录中的应用锁和待应用标记协作；Kubernetes `xray-reloader` 负责同 Pod Xray 进程重载。
+- 报告由管理器写入共享 `app/xray/reports`，面板从同一卷读取；详细流程见 [AI 路由](ai-routing.md) 与 [K3s 部署](kubernetes.md)。
 
 ## Next
 
-- None（尚无已指定的后续任务）。
+- 在具备 K3s 测试节点后执行 sidecar 滚动重载验收；在完整 CI 依赖与凭据环境复核全量测试。
