@@ -247,11 +247,26 @@ class AiDomainManagerTest(unittest.TestCase):
         self.assertEqual(controller.config.source_panel_ports_path, Path("/tmp/panel-ports.json"))
 
     def test_run_once_restarts_when_remote_config_was_replaced(self):
+        self._check_run_once_recovery()
+
+    def test_run_once_retries_failed_restart_with_unchanged_files(self):
+        for failure in (False, RuntimeError("synthetic restart timeout")):
+            with self.subTest(failure=type(failure).__name__):
+                self._check_run_once_recovery(failure=failure)
+
+    def test_forced_fallback_renders_without_ai_fragment(self):
+        self._check_run_once_recovery(forced=True)
+
+    def _check_run_once_recovery(self, failure=None, forced=False):
         controller = mock.Mock()
         controller.is_configured.return_value = True
         controller.supports_sync.return_value = True
         controller.sync_generated_files.return_value = ["/root/xray/runtime/config.json"]
         controller.supports_restart.return_value = True
+        controller.restart.return_value = True
+        if failure is not None:
+            controller.restart.side_effect = [failure, True]
+            controller.sync_generated_files.side_effect = [["/root/xray/runtime/config.json"], [], []]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -259,6 +274,13 @@ class AiDomainManagerTest(unittest.TestCase):
             config_out.parent.mkdir()
             config_out.write_text("same", encoding="utf-8")
             dynamic_routing_path = root / "runtime" / "dynamic-routing.json"
+            if forced:
+                dynamic_routing_path.write_text('{"routing": {"rules": []}}', encoding="utf-8")
+
+            def render(*_args):
+                if forced:
+                    self.assertFalse(dynamic_routing_path.exists())
+                config_out.write_text("direct" if forced else "same", encoding="utf-8")
             args = mock.Mock(
                 log_state_path=root / "log-state.json",
                 log_path=root / "access.log",
@@ -288,7 +310,7 @@ class AiDomainManagerTest(unittest.TestCase):
             with mock.patch.object(ai_domain_manager, "build_data_plane_controller", return_value=controller), \
                 mock.patch.object(ai_domain_manager, "sync_log"), \
                 mock.patch.object(ai_domain_manager, "sync_builtin_domain_decisions"), \
-                mock.patch.object(ai_domain_manager, "read_ai_routing_manual_mode", return_value="auto"), \
+                mock.patch.object(ai_domain_manager, "read_ai_routing_manual_mode", return_value="forced_fallback" if forced else "auto"), \
                 mock.patch.object(
                     ai_domain_manager,
                     "select_ai_target",
@@ -300,13 +322,23 @@ class AiDomainManagerTest(unittest.TestCase):
                         "candidates": [],
                     },
                 ), \
-                mock.patch.object(ai_domain_manager, "rerender_config", side_effect=lambda *_args: config_out.write_text("same", encoding="utf-8")), \
+                mock.patch.object(ai_domain_manager, "rerender_config", side_effect=render), \
                 mock.patch.object(ai_domain_manager, "save_ai_domains_to_panel_db", return_value={}), \
                 mock.patch.object(ai_domain_manager, "write_domain_report"), \
                 mock.patch.object(ai_domain_manager, "save_log_state"):
+                pending = config_out.with_name("config.json.pending-apply")
+                if failure is not None:
+                    with self.assertRaises(RuntimeError):
+                        ai_domain_manager.run_once(args)
+                    self.assertTrue(pending.exists())
                 ai_domain_manager.run_once(args)
+                self.assertFalse(pending.exists())
+                if failure is not None:
+                    ai_domain_manager.run_once(args)
+                if forced:
+                    self.assertEqual(config_out.read_text(encoding="utf-8"), "direct")
 
-        controller.restart.assert_called_once_with()
+        self.assertEqual(controller.restart.call_count, 2 if failure is not None else 1)
 
     @mock.patch.object(ai_domain_manager, "probe_ai_upstream_candidate")
     def test_select_ai_target_can_manually_select_backup(self, mocked_probe):

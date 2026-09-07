@@ -467,16 +467,16 @@ class CoreService:
             backup_config_path.read_text(encoding="utf-8") if backup_config_path.exists() else None
         )
         panel_ports_payload = self._panel.render_panel_ports_payload(conn)
-        backup_restarted = False
+        backup_restart_attempted = False
         data_plane_restart_attempted = False
         try:
             self._panel.write_json_file(XRAY_PANEL_PORTS_PATH, panel_ports_payload)
             self._panel.render_xray_config()
             self._panel.xray_config_test()
             if CONTROL_PLANE_BACKUP_XRAY_ENABLED:
+                backup_restart_attempted = True
                 if not self._panel.restart_backup_xray():
                     raise RuntimeError("控制面备用 Xray 重载失败，端口变更未提交。")
-                backup_restarted = True
             if reload_xray:
                 data_plane_restart_attempted = True
                 if not self._panel.restart_data_plane():
@@ -501,7 +501,7 @@ class CoreService:
                 backup_config_path.unlink(missing_ok=True)
             else:
                 backup_config_path.write_text(previous_backup_config, encoding="utf-8")
-            if backup_restarted:
+            if backup_restart_attempted:
                 try:
                     if not self._panel.restart_backup_xray():
                         emit_business_event(

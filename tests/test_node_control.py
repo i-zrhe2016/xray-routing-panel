@@ -293,8 +293,24 @@ class NodeControlTest(unittest.TestCase):
         self.assertEqual(config_path.read_text(encoding="utf-8"), previous_config)
         self.assertEqual(backup_config_path.read_text(encoding="utf-8"), previous_backup_config)
 
+    def test_forced_fallback_uses_manager_and_restores_mode_on_failure(self):
+        os.environ["AI_ROUTING_ENABLED"] = "1"
+        state = load_state_module(self.root).PanelState()
+        state.init_db()
+        state.data_plane.is_configured = lambda: True
+        with mock.patch.object(state.ai_routing, "_trigger_ai_domain_manager") as trigger:
+            state.set_ai_routing_manual_mode("forced_fallback")
+            trigger.assert_called_once_with()
+        self.assertEqual(state.ai_routing_manual_state()["mode"], "forced_fallback")
+        with (
+            mock.patch.object(state.ai_routing, "_trigger_ai_domain_manager", side_effect=RuntimeError("apply failed")),
+            self.assertRaisesRegex(RuntimeError, "apply failed"),
+        ):
+            state.set_ai_routing_manual_mode("auto")
+        self.assertEqual(state.ai_routing_manual_state()["mode"], "forced_fallback")
+
     def test_config_failure_restores_database_files_and_running_nodes(self):
-        for failure in ("restart_false", "restart_timeout", "commit"):
+        for failure in ("restart_false", "restart_timeout", "commit", "backup_false", "backup_timeout"):
             for remote in (False, True):
                 with self.subTest(failure=failure, remote=remote):
                     os.environ["CONTROL_PLANE_BACKUP_XRAY_ENABLED"] = "1"
@@ -324,8 +340,13 @@ class NodeControlTest(unittest.TestCase):
                                 raise RuntimeError("synthetic restart timeout")
                         return True
 
-                    def restart_backup(running=running, paths=paths):
+                    def restart_backup(running=running, paths=paths, failure=failure):
                         running["backup"] = paths[2].read_text(encoding="utf-8")
+                        if running["backup"] == "new":
+                            if failure == "backup_false":
+                                return False
+                            if failure == "backup_timeout":
+                                raise RuntimeError("synthetic backup timeout")
                         return True
 
                     state.render_xray_config = render
@@ -351,7 +372,7 @@ class NodeControlTest(unittest.TestCase):
                         self.assertEqual(state.get_state(conn, "review_marker"), "old")
                     self.assertTrue(all(path.read_text(encoding="utf-8") == "old" for path in paths))
                     self.assertEqual(running, {"primary": "old", "backup": "old"})
-                    self.assertEqual(state.restart_data_plane.call_count, 2)
+                    self.assertEqual(state.restart_data_plane.call_count, 0 if failure.startswith("backup") else 2)
                     self.assertEqual(syncs, ["old"] if remote else [])
 
     def test_remote_sync_uses_unique_temp_config_with_json_suffix(self):

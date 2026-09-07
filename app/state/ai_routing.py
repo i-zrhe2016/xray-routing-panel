@@ -236,14 +236,9 @@ class AiRoutingService:
         previous_mode = self.ai_routing_manual_state()["mode"]
         self._panel.apply_state_update(operation)
         try:
-            if mode == "forced_fallback":
-                if not self._panel.data_plane.is_configured():
-                    raise ValidationError("数据面未配置，无法应用 AI 回退。")
-                self._panel.data_plane.remove_dynamic_routing()
-                if self._panel.data_plane.supports_restart() and not self._panel.data_plane.restart():
-                    raise RuntimeError("数据面未能重启，AI 回退可能尚未生效。")
-            else:
-                self._trigger_ai_domain_manager()
+            if mode == "forced_fallback" and not self._panel.data_plane.is_configured():
+                raise ValidationError("数据面未配置，无法应用 AI 回退。")
+            self._trigger_ai_domain_manager()
         except Exception:
             def restore(conn):
                 self._panel.set_state(conn, "ai_routing_manual_mode", previous_mode)

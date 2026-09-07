@@ -4,7 +4,7 @@ Last verified: 2026-09-07 @ working tree
 
 ## Current Focus
 
-- 核心审查发现的订阅到期与配置事务一致性修复；代码和回归验证已完成，尚未部署。
+- AI 路由应用与失败恢复修复；代码和本地回归验证已完成，尚未部署。
 
 ## Implemented
 
@@ -12,6 +12,8 @@ Last verified: 2026-09-07 @ working tree
 - 数据面重载返回失败时阻止业务提交；数据库提交异常进入配置补偿路径。
 - 失败时恢复原配置，并对已尝试重载的数据面重新加载原配置；远端同步或回滚重载失败记录 `node.data_plane.rollback_failed`。
 - 维护规则及补偿边界见 [运维与排障](operations.md#自动维护规则)。
+- 强制回退经管理器重新生成完整配置；待应用标记确保失败后在文件未变化时仍重试，成功后清除。
+- 备用节点重启已尝试但返回失败时也补偿重载原配置；见 [AI 路由](ai-routing.md#输入与输出)。
 
 ## In Progress
 
@@ -19,7 +21,7 @@ Last verified: 2026-09-07 @ working tree
 
 ## Known Issues / Failing Checks
 
-- 完整测试集为 226 passed、1 skipped；真实传输测试需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy，当前未验证真实节点行为。
+- 完整测试集为 229 passed、1 skipped；真实传输测试需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy，当前未验证真实节点行为。
 - 涉及文件存在既有 Ruff 告警，本次修改未新增；固定版本 Werkzeug 在 Python 3.12 下产生弃用警告。
 
 ## Constraints

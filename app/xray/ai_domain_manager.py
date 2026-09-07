@@ -1292,6 +1292,8 @@ def summarize_ai_target_candidate(candidate):
 
 
 def summarize_ai_target_for_report(ai_target):
+    if ai_target.get("probe_status") == "manual_fallback":
+        return dict(ai_target)
     summary = summarize_ai_target_candidate(ai_target)
     for key in (
         "selected_index",
@@ -2022,6 +2024,12 @@ def run_once(args):
         route_status = {"status": "idle", "reason": "no_ai_domains"}
 
     previous_config = args.config_out.read_text(encoding="utf-8") if args.config_out.is_file() else ""
+    pending_apply_path = args.config_out.with_name(args.config_out.name + ".pending-apply")
+    pending_apply = pending_apply_path.exists()
+    pending_apply_path.parent.mkdir(parents=True, exist_ok=True)
+    # Persist before rendering/syncing: either can update files before failing.
+    # A later invocation must retry even if the generated files no longer differ.
+    pending_apply_path.touch()
     rerender_config(
         args.render_script,
         args.env_file,
@@ -2042,12 +2050,17 @@ def run_once(args):
             synced_paths = data_plane_controller.sync_generated_files(validate_config=True)
             remote_config_path = str(getattr(args, "data_plane_config_path", "") or "").strip()
             remote_config_changed = bool(remote_config_path and remote_config_path in {str(path) for path in synced_paths})
-        if (config_changed or remote_config_changed) and data_plane_controller.supports_restart():
-            data_plane_controller.restart()
-    elif config_changed and args.restart_command:
+        if (config_changed or remote_config_changed or pending_apply) and (
+            not data_plane_controller.supports_restart() or not data_plane_controller.restart()
+        ):
+            raise RuntimeError("AI 路由配置重载失败，保留待应用状态以便重试。")
+        pending_apply_path.unlink(missing_ok=True)
+    elif (config_changed or pending_apply) and args.restart_command:
         restart_xray_command(args.restart_command, args.docker_timeout_seconds)
-    elif config_changed and args.restart_container_name:
+        pending_apply_path.unlink(missing_ok=True)
+    elif (config_changed or pending_apply) and args.restart_container_name:
         restart_xray_container(args.restart_container_name, args.docker_timeout_seconds)
+        pending_apply_path.unlink(missing_ok=True)
 
     report = build_domain_report(log_state, cutoff, now, decisions, ai_target, panel_target, route_status)
     if pending_without_classifier:
