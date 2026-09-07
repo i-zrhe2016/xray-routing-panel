@@ -4,7 +4,7 @@ Last verified: 2026-09-07 @ working tree
 
 ## Current Focus
 
-- AI 路由主要 review findings 已修复，尚未部署到生产。
+- AI 路由主要 review findings 已修复并部署到控制面 Docker Compose；K3s 完整栈仍未部署。
 
 ## Implemented
 
@@ -23,7 +23,8 @@ Last verified: 2026-09-07 @ working tree
 - 受影响定向回归通过：管理器、节点控制、商业履约共 68 项；本地 Xray、节点恢复、备用周期和渲染共 29 项。`py_compile`、Compose 配置、Kubernetes YAML 和 reloader shell 语法检查通过。
 - 全量 `unittest discover` 在当前容器不干净：6 个 pytest 测试因镜像未安装 pytest 无法导入，另有 Google/本地 socket/管理员凭据相关环境失败；需在完整 CI 凭据与依赖环境复核。
 - Open Code Review CLI preview 可生成变更清单，但实际 review 因未配置 `OCR_LLM_URL/OCR_LLM_TOKEN/OCR_LLM_MODEL`（或等效 Anthropic 配置）未执行。
-- 尚未在生产 K3s 节点验证 sidecar 实际滚动重载；生产运行状态为 Unverified。
+- 当前控制面的 `xray-routing-panel` 已重建并健康运行，`/healthz` 返回 `ok=true`；本次未启动 Compose 的 Xray profile。
+- 尚未在 K3s 节点验证 sidecar 实际滚动重载；K3s 运行状态为 Unverified。
 
 ## Constraints
 
@@ -38,4 +39,4 @@ Last verified: 2026-09-07 @ working tree
 
 ## Next
 
-- 在具备 OCR LLM 配置和 K3s 测试节点后执行完整 code review 与部署验收。
+- 在具备 K3s 测试节点后执行 sidecar 滚动重载验收；在完整 CI 依赖与凭据环境复核全量测试。
