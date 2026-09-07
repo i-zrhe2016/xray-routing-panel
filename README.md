@@ -170,6 +170,7 @@ Admin 控制台的源码与 Vite 构建配置位于 `frontend/`；构建后会�
 ### 开始使用
 
 - [文档首页](docs/index.md) — 阅读顺序和完整索引。
+- [仓库当前状态](docs/Repo_Current_State.md) — 已核实的实现、验证限制与当前工作状态。
 - [项目概览](docs/project-overview.md) — 项目定位、核心能力、架构摘要和快速开始。
 - [架构说明](docs/architecture.md) — 控制面、普通数据面、AI 数据面、组件边界和数据流。
 - [配置说明](docs/configuration.md) — 根 `.env`、Xray 环境变量及各模块配置。

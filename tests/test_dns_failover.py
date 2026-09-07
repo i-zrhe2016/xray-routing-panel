@@ -107,7 +107,7 @@ class DnsFailoverTest(unittest.TestCase):
         state = state_module.PanelState()
         state.render_xray_config = lambda: None
         state.xray_config_test = lambda: None
-        state.restart_data_plane = lambda: None
+        state.restart_data_plane = lambda: True
         state.init_db()
         return state, state_module
 

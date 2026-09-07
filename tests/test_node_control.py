@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -11,9 +12,9 @@ from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 from app.xray.node_control import (
+    REMOTE_FILE_DELTA_SCRIPT,
     DataPlaneConfig,
     DataPlaneController,
-    REMOTE_FILE_DELTA_SCRIPT,
     build_temp_target_path,
 )
 
@@ -291,6 +292,67 @@ class NodeControlTest(unittest.TestCase):
         self.assertEqual(panel_ports_path.read_text(encoding="utf-8"), previous_panel_ports)
         self.assertEqual(config_path.read_text(encoding="utf-8"), previous_config)
         self.assertEqual(backup_config_path.read_text(encoding="utf-8"), previous_backup_config)
+
+    def test_config_failure_restores_database_files_and_running_nodes(self):
+        for failure in ("restart_false", "restart_timeout", "commit"):
+            for remote in (False, True):
+                with self.subTest(failure=failure, remote=remote):
+                    os.environ["CONTROL_PLANE_BACKUP_XRAY_ENABLED"] = "1"
+                    os.environ["XRAY_CLIENT_CONFIG_PATH"] = str(self.root / "client.json")
+                    state = load_state_module(self.root).PanelState()
+                    state.init_db()
+                    runtime = self.root / "xray" / "runtime"
+                    paths = [
+                        runtime / name
+                        for name in ("config.json", "panel-ports.json", "config-backup.json", "client-share.txt")
+                    ] + [self.root / "client.json"]
+                    for path in paths:
+                        path.write_text("old", encoding="utf-8")
+                    running = {"primary": "old", "backup": "old"}
+                    syncs = []
+
+                    def render(paths=paths):
+                        for path in paths:
+                            path.write_text("new", encoding="utf-8")
+
+                    def restart(running=running, paths=paths, failure=failure):
+                        running["primary"] = paths[0].read_text(encoding="utf-8")
+                        if running["primary"] == "new":
+                            if failure == "restart_false":
+                                return False
+                            if failure == "restart_timeout":
+                                raise RuntimeError("synthetic restart timeout")
+                        return True
+
+                    def restart_backup(running=running, paths=paths):
+                        running["backup"] = paths[2].read_text(encoding="utf-8")
+                        return True
+
+                    state.render_xray_config = render
+                    state.xray_config_test = lambda: None
+                    state.restart_data_plane = mock.Mock(side_effect=restart)
+                    state.restart_backup_xray = restart_backup
+                    state.data_plane.supports_sync = lambda remote=remote: remote
+                    state.data_plane.sync_generated_files = lambda syncs=syncs, paths=paths, **kw: syncs.append(
+                        paths[0].read_text(encoding="utf-8")
+                    )
+                    with state.connect() as conn:
+                        state.set_state(conn, "review_marker", "old")
+                        conn.commit()
+                        conn.execute("BEGIN IMMEDIATE")
+                        state.set_state(conn, "review_marker", "new")
+                        wrapped = mock.Mock(wraps=conn)
+                        if failure == "commit":
+                            wrapped.commit.side_effect = sqlite3.OperationalError("synthetic commit failure")
+                        with self.assertRaises((RuntimeError, sqlite3.OperationalError)):
+                            state.persist_and_reload(wrapped, reload_xray=True)
+                        self.assertFalse(conn.in_transaction)
+                    with state.connect() as conn:
+                        self.assertEqual(state.get_state(conn, "review_marker"), "old")
+                    self.assertTrue(all(path.read_text(encoding="utf-8") == "old" for path in paths))
+                    self.assertEqual(running, {"primary": "old", "backup": "old"})
+                    self.assertEqual(state.restart_data_plane.call_count, 2)
+                    self.assertEqual(syncs, ["old"] if remote else [])
 
     def test_remote_sync_uses_unique_temp_config_with_json_suffix(self):
         source_config = self.root / "config.json"

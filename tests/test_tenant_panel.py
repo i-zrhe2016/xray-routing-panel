@@ -119,7 +119,7 @@ def load_panel_module(temp_root, panel_username="", panel_password="", probe_ena
     module = importlib.reload(module)
     module.state.render_xray_config = lambda: None
     module.state.xray_config_test = lambda: None
-    module.state.restart_data_plane = lambda: None
+    module.state.restart_data_plane = lambda: True
     module.state.data_plane_configured = lambda: False
     module.state.data_plane_running = lambda: False
     module.state.init_db()

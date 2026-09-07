@@ -17,6 +17,7 @@
 
 ## 开始使用
 
+- [仓库当前状态](Repo_Current_State.md) — 已核实的实现、验证限制与当前工作状态。
 - [项目概览](project-overview.md) — 项目能力、架构摘要和快速开始。
 - [架构说明](architecture.md) — 组件职责、数据流、运行产物和边界。
 - [配置说明](configuration.md) — 根 `.env`、Xray 环境变量及模块配置。

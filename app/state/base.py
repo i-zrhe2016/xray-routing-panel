@@ -34,6 +34,7 @@ from ..helpers import (
     generate_tenant_username,
     localize_time,
     parse_port,
+    port_is_expired,
     utc_iso_now,
     utc_now,
 )
@@ -444,7 +445,8 @@ class CoreService:
         for row in rows:
             usage_bytes = int(row["total_bytes_sent"]) + int(row["total_bytes_received"])
             quota_reached = row["traffic_limit_bytes"] is not None and usage_bytes >= int(row["traffic_limit_bytes"])
-            if quota_reached:
+            expired = port_is_expired(row["expires_at"], now_dt)
+            if expired or quota_reached:
                 conn.execute(
                     "UPDATE ports SET enabled = 0, updated_at = ? WHERE id = ?",
                     (now_text, row["id"]),
@@ -465,9 +467,10 @@ class CoreService:
             backup_config_path.read_text(encoding="utf-8") if backup_config_path.exists() else None
         )
         panel_ports_payload = self._panel.render_panel_ports_payload(conn)
-        self._panel.write_json_file(XRAY_PANEL_PORTS_PATH, panel_ports_payload)
         backup_restarted = False
+        data_plane_restart_attempted = False
         try:
+            self._panel.write_json_file(XRAY_PANEL_PORTS_PATH, panel_ports_payload)
             self._panel.render_xray_config()
             self._panel.xray_config_test()
             if CONTROL_PLANE_BACKUP_XRAY_ENABLED:
@@ -475,8 +478,12 @@ class CoreService:
                     raise RuntimeError("控制面备用 Xray 重载失败，端口变更未提交。")
                 backup_restarted = True
             if reload_xray:
-                self._panel.restart_data_plane()
+                data_plane_restart_attempted = True
+                if not self._panel.restart_data_plane():
+                    raise RuntimeError("数据面重载失败，端口变更未提交。")
+            conn.commit()
         except Exception:
+            conn.rollback()
             for path, content in previous_subscriptions.items():
                 if content is None:
                     path.unlink(missing_ok=True)
@@ -513,13 +520,23 @@ class CoreService:
                         resource_id="control_plane_backup",
                         exc=exc,
                     )
-            if self._panel.data_plane.supports_sync():
-                try:
+            try:
+                if self._panel.data_plane.supports_sync():
                     self._panel.data_plane.sync_generated_files(validate_config=True)
-                except RuntimeError:
-                    pass
+                # A timeout can occur after the node has already loaded the new
+                # config. Restore its running state as well as the files.
+                if data_plane_restart_attempted and not self._panel.restart_data_plane():
+                    raise RuntimeError("数据面回滚重载失败。")
+            except Exception as exc:  # noqa: BLE001 - preserve the original apply/commit failure
+                emit_business_event(
+                    "node.data_plane.rollback_failed",
+                    result="failure",
+                    actor_type="system",
+                    resource_type="node",
+                    resource_id="data_plane",
+                    exc=exc,
+                )
             raise
-        conn.commit()
     def render_panel_ports_payload(self, conn):
         rows = conn.execute(
             """

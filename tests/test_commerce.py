@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-
+from unittest import mock
 
 PNG_BYTES = (
     b"\x89PNG\r\n\x1a\n"
@@ -111,7 +111,7 @@ def load_panel_module(temp_root, panel_username="", panel_password=""):
     module = importlib.reload(module)
     module.state.render_xray_config = lambda: None
     module.state.xray_config_test = lambda: None
-    module.state.restart_data_plane = lambda: None
+    module.state.restart_data_plane = lambda: True
     module.state.data_plane_configured = lambda: False
     module.state.data_plane_running = lambda: False
     module.state.init_db()
@@ -276,6 +276,37 @@ class CommerceFlowTest(unittest.TestCase):
         self.assertEqual(rolled_back_order["status"], "payment_submitted")
         self.assertEqual(self.panel.state.query_customer_service_subscriptions(1), [])
         self.assertEqual(self.panel.state.query_ports(), [])
+
+    def test_expired_commercial_service_is_disabled_but_kept_for_renewal(self):
+        self.register_customer()
+        for _ in range(2):
+            order = self.create_existing_order()
+            self.submit_payment_proof(order["order_no"])
+            self.panel.state.fulfill_order(order["id"])
+        services = self.panel.state.query_customer_service_subscriptions(1)
+        expired, active = services
+        with self.panel.state.connect() as conn:
+            conn.execute(
+                "UPDATE ports SET expires_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", expired["port_id"]),
+            )
+            conn.commit()
+        with mock.patch.object(self.panel.state, "restart_data_plane", return_value=True) as restart:
+            self.assertEqual(self.panel.state.disable_auto_stopped_ports(), 1)
+            restart.assert_called_once()
+            self.assertEqual(self.panel.state.disable_auto_stopped_ports(), 0)
+            restart.assert_called_once()
+        with self.panel.state.connect() as conn:
+            self.assertEqual(
+                conn.execute("SELECT enabled FROM ports WHERE id = ?", (expired["port_id"],)).fetchone()[0], 0
+            )
+            self.assertEqual(
+                conn.execute("SELECT enabled FROM ports WHERE id = ?", (active["port_id"],)).fetchone()[0], 1
+            )
+            self.assertEqual(self.panel.state.render_panel_ports_payload(conn), {"ports": [active["listen_port"]]})
+        renewed = self.panel.state.get_customer_service_subscription(1, expired["id"])
+        self.assertTrue(renewed["renewal_allowed"])
+        self.assertEqual(renewed["subscription_token"], expired["subscription_token"])
 
     def test_renewal_requires_quota_or_expired_and_keeps_same_port(self):
         self.register_customer()
