@@ -145,6 +145,9 @@ AI_DOMAIN_MANAGER_CONTAINER_NAME = os.environ.get(
     "AI_DOMAIN_MANAGER_CONTAINER_NAME", "xray-routing-panel-xray-ai-domain-manager-1"
 ).strip()
 AI_DOMAIN_MANAGER_DOCKER_BIN = os.environ.get("AI_DOMAIN_MANAGER_DOCKER_BIN", "docker").strip() or "docker"
+AI_DOMAIN_MANAGER_EXECUTION_MODE = os.environ.get(
+    "AI_DOMAIN_MANAGER_EXECUTION_MODE", "docker"
+).strip().lower() or "docker"
 
 PANEL_HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
 PANEL_PORT = int(os.environ.get("PANEL_PORT", "18080"))

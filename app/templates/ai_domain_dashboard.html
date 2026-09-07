@@ -158,7 +158,15 @@
             </div>
             <div class="info-tile">
               <span>配置变更</span>
-              <strong>{{ '已变更' if dashboard.report.config_changed else '无变化' }}</strong>
+              <strong>
+                {% if dashboard.report.config_retried %}
+                已重试应用
+                {% elif dashboard.report.config_changed %}
+                已变更
+                {% else %}
+                无变化
+                {% endif %}
+              </strong>
             </div>
             <div class="info-tile">
               <span>AI 目标</span>

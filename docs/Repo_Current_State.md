@@ -14,6 +14,8 @@ Last verified: 2026-09-07 @ working tree
 - 维护规则及补偿边界见 [运维与排障](operations.md#自动维护规则)。
 - 强制回退经管理器重新生成完整配置；待应用标记确保失败后在文件未变化时仍重试，成功后清除。
 - 备用节点重启已尝试但返回失败时也补偿重载原配置；见 [AI 路由](ai-routing.md#输入与输出)。
+- AI 管理器使用共享文件锁串行化常驻与手动应用；强制回退跳过远程分类，Kubernetes 通过本地调用和外部重载器配置接管重启。
+- 人工模式通过一次性参数先应用、成功后再写入 `app_state`；应用后的报表写入失败不会回滚已生效的数据面配置。
 
 ## In Progress
 
@@ -21,7 +23,7 @@ Last verified: 2026-09-07 @ working tree
 
 ## Known Issues / Failing Checks
 
-- 完整测试集为 229 passed、1 skipped；真实传输测试需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy，当前未验证真实节点行为。
+- 定向 AI 路由/节点测试为 57 passed；完整测试集为 232 passed、1 skipped，另有一个受沙箱网络权限限制的本地 socket 测试未通过。真实传输测试需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy，当前未验证真实节点行为。
 - 涉及文件存在既有 Ruff 告警，本次修改未新增；固定版本 Werkzeug 在 Python 3.12 下产生弃用警告。
 
 ## Constraints

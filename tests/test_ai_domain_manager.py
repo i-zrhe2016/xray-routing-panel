@@ -257,7 +257,98 @@ class AiDomainManagerTest(unittest.TestCase):
     def test_forced_fallback_renders_without_ai_fragment(self):
         self._check_run_once_recovery(forced=True)
 
-    def _check_run_once_recovery(self, failure=None, forced=False):
+    def test_forced_fallback_skips_domain_classifier(self):
+        with mock.patch.object(
+            ai_domain_manager,
+            "classify_pending_domains",
+            side_effect=AssertionError("forced fallback must not classify domains"),
+        ):
+            self._check_run_once_recovery(forced=True)
+
+    def test_run_once_honors_explicit_manual_mode_override(self):
+        self._check_run_once_recovery(forced=True, manual_mode_override="forced_fallback")
+
+    def test_run_once_reports_success_when_post_apply_persistence_fails(self):
+        result = self._check_run_once_recovery(report_failure=True)
+        self.assertEqual(result["status"], "applied_with_reporting_error")
+
+    def test_run_once_rejects_a_concurrent_manager_process(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            lock_path = root / "runtime" / ".ai-domain-manager.lock"
+            lock_path.parent.mkdir()
+            args = mock.Mock(config_out=root / "runtime" / "config.json", apply_lock_path=lock_path)
+            with ai_domain_manager.exclusive_file_lock(lock_path), self.assertRaises(ai_domain_manager.LockBusyError):
+                ai_domain_manager.run_once(args)
+
+    def test_run_once_delegates_unmanaged_data_plane_reload(self):
+        controller = mock.Mock()
+        controller.is_configured.return_value = True
+        controller.mode = "unmanaged"
+        controller.supports_sync.return_value = False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_out = root / "runtime" / "config.json"
+            config_out.parent.mkdir()
+            config_out.write_text("old", encoding="utf-8")
+            dynamic_routing_path = root / "runtime" / "dynamic-routing.json"
+            args = mock.Mock(
+                log_state_path=root / "log-state.json",
+                log_path=root / "access.log",
+                lookback_seconds=3600,
+                classification_state_path=root / "decisions.json",
+                panel_db_path=root / "panel.db",
+                panel_route_listen_port=None,
+                ai_upstream_candidates=[{"upstream_host": "ai.example.com", "upstream_port": 27166}],
+                ai_upstream_probe_timeout_seconds=2.0,
+                batch_size=50,
+                codex_classifier_enabled=False,
+                openai_classifier_enabled=False,
+                proxy_template_path=root / "missing-template.json",
+                dynamic_routing_path=dynamic_routing_path,
+                render_script="app.xray.render_config",
+                env_file=root / "xray.env",
+                config_out=config_out,
+                client_out=root / "runtime" / "client-test.json",
+                share_out=root / "runtime" / "client-share.txt",
+                data_plane_config_path="/etc/xray/config.json",
+                data_plane_external_reloader_enabled=True,
+                restart_command="",
+                restart_container_name="",
+                docker_timeout_seconds=5,
+                report_output_dir=root / "reports",
+            )
+
+            def render(*_args):
+                config_out.write_text("new", encoding="utf-8")
+
+            with mock.patch.object(ai_domain_manager, "build_data_plane_controller", return_value=controller), \
+                mock.patch.object(ai_domain_manager, "sync_log"), \
+                mock.patch.object(ai_domain_manager, "sync_builtin_domain_decisions"), \
+                mock.patch.object(ai_domain_manager, "read_ai_routing_manual_mode", return_value="auto"), \
+                mock.patch.object(
+                    ai_domain_manager,
+                    "select_ai_target",
+                    return_value={"probe_status": "all_reachable", "is_reachable": True, "candidates": []},
+                ), \
+                mock.patch.object(ai_domain_manager, "rerender_config", side_effect=render), \
+                mock.patch.object(ai_domain_manager, "save_ai_domains_to_panel_db", return_value={}), \
+                mock.patch.object(ai_domain_manager, "write_domain_report"), \
+                mock.patch.object(ai_domain_manager, "save_log_state"), \
+                mock.patch.object(ai_domain_manager, "save_json"):
+                result = ai_domain_manager.run_once(args)
+
+        self.assertEqual(result["config_apply_status"], "delegated")
+        controller.restart.assert_not_called()
+
+    def _check_run_once_recovery(
+        self,
+        failure=None,
+        forced=False,
+        report_failure=False,
+        manual_mode_override=None,
+    ):
         controller = mock.Mock()
         controller.is_configured.return_value = True
         controller.supports_sync.return_value = True
@@ -305,12 +396,22 @@ class AiDomainManagerTest(unittest.TestCase):
                 restart_container_name="",
                 docker_timeout_seconds=5,
                 report_output_dir=root / "reports",
+                manual_mode=manual_mode_override,
             )
 
             with mock.patch.object(ai_domain_manager, "build_data_plane_controller", return_value=controller), \
                 mock.patch.object(ai_domain_manager, "sync_log"), \
                 mock.patch.object(ai_domain_manager, "sync_builtin_domain_decisions"), \
-                mock.patch.object(ai_domain_manager, "read_ai_routing_manual_mode", return_value="forced_fallback" if forced else "auto"), \
+                mock.patch.object(
+                    ai_domain_manager,
+                    "read_ai_routing_manual_mode",
+                    side_effect=AssertionError("explicit mode should not read panel state")
+                    if manual_mode_override is not None
+                    else None,
+                    return_value=("forced_fallback" if forced else "auto")
+                    if manual_mode_override is None
+                    else mock.DEFAULT,
+                ), \
                 mock.patch.object(
                     ai_domain_manager,
                     "select_ai_target",
@@ -323,7 +424,12 @@ class AiDomainManagerTest(unittest.TestCase):
                     },
                 ), \
                 mock.patch.object(ai_domain_manager, "rerender_config", side_effect=render), \
-                mock.patch.object(ai_domain_manager, "save_ai_domains_to_panel_db", return_value={}), \
+                mock.patch.object(
+                    ai_domain_manager,
+                    "save_ai_domains_to_panel_db",
+                    side_effect=RuntimeError("synthetic report failure") if report_failure else None,
+                    return_value={} if not report_failure else mock.DEFAULT,
+                ), \
                 mock.patch.object(ai_domain_manager, "write_domain_report"), \
                 mock.patch.object(ai_domain_manager, "save_log_state"):
                 pending = config_out.with_name("config.json.pending-apply")
@@ -331,7 +437,7 @@ class AiDomainManagerTest(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         ai_domain_manager.run_once(args)
                     self.assertTrue(pending.exists())
-                ai_domain_manager.run_once(args)
+                result = ai_domain_manager.run_once(args)
                 self.assertFalse(pending.exists())
                 if failure is not None:
                     ai_domain_manager.run_once(args)
@@ -339,6 +445,7 @@ class AiDomainManagerTest(unittest.TestCase):
                     self.assertEqual(config_out.read_text(encoding="utf-8"), "direct")
 
         self.assertEqual(controller.restart.call_count, 2 if failure is not None else 1)
+        return result
 
     @mock.patch.object(ai_domain_manager, "probe_ai_upstream_candidate")
     def test_select_ai_target_can_manually_select_backup(self, mocked_probe):

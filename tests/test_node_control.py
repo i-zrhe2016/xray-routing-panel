@@ -298,9 +298,15 @@ class NodeControlTest(unittest.TestCase):
         state = load_state_module(self.root).PanelState()
         state.init_db()
         state.data_plane.is_configured = lambda: True
-        with mock.patch.object(state.ai_routing, "_trigger_ai_domain_manager") as trigger:
+        observed_modes = []
+
+        def apply_manager(requested_mode):
+            observed_modes.append((requested_mode, state.ai_routing.ai_routing_manual_state()["mode"]))
+
+        with mock.patch.object(state.ai_routing, "_trigger_ai_domain_manager", side_effect=apply_manager) as trigger:
             state.set_ai_routing_manual_mode("forced_fallback")
-            trigger.assert_called_once_with()
+            trigger.assert_called_once_with("forced_fallback")
+        self.assertEqual(observed_modes, [("forced_fallback", "auto")])
         self.assertEqual(state.ai_routing_manual_state()["mode"], "forced_fallback")
         with (
             mock.patch.object(state.ai_routing, "_trigger_ai_domain_manager", side_effect=RuntimeError("apply failed")),
@@ -308,6 +314,28 @@ class NodeControlTest(unittest.TestCase):
         ):
             state.set_ai_routing_manual_mode("auto")
         self.assertEqual(state.ai_routing_manual_state()["mode"], "forced_fallback")
+
+    def test_manual_manager_can_run_locally_in_a_shared_pod(self):
+        os.environ["AI_DOMAIN_MANAGER_EXECUTION_MODE"] = "local"
+        state = load_state_module(self.root).PanelState()
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("app.state.ai_routing.subprocess.run", return_value=completed) as run:
+            state.ai_routing._trigger_ai_domain_manager("forced_fallback")
+
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command,
+            [
+                sys.executable,
+                "-m",
+                "app.xray.ai_domain_manager",
+                "--once",
+                "--manual-mode",
+                "forced_fallback",
+                "--manual-lock-held",
+            ],
+        )
+        self.assertEqual(run.call_args.kwargs["cwd"], str(Path(__file__).resolve().parents[1]))
 
     def test_config_failure_restores_database_files_and_running_nodes(self):
         for failure in ("restart_false", "restart_timeout", "commit", "backup_false", "backup_timeout"):
@@ -714,6 +742,7 @@ class NodeControlTest(unittest.TestCase):
                     "route_status": {
                         "status": "pending",
                         "reason": "classifier_disabled",
+                        "config_retried": True,
                         "pending_domains_without_classifier": [
                             "api.example.com",
                             "cdn.example.com",
@@ -728,6 +757,7 @@ class NodeControlTest(unittest.TestCase):
 
         self.assertEqual(report["route_status"], "pending")
         self.assertEqual(report["pending_domains_without_classifier"], 2)
+        self.assertTrue(report["config_retried"])
 
     def test_render_xray_config_pulls_remote_dynamic_routing_first(self):
         os.environ["DATAPLANE_SSH_TARGET"] = "root@default-node"

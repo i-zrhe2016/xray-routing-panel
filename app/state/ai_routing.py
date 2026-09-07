@@ -1,22 +1,25 @@
 import json
+import os
 import subprocess
-
+import sys
+from pathlib import Path
 
 from ..config import (
     AI_DOMAIN_MANAGER_CONTAINER_NAME,
     AI_DOMAIN_MANAGER_DOCKER_BIN,
+    AI_DOMAIN_MANAGER_EXECUTION_MODE,
     AI_ROUTING_ENABLED,
+    XRAY_CONFIG_PATH,
     XRAY_ENV_FILE_PATH,
 )
+from ..errors import ValidationError
 from ..helpers import (
     utc_iso_now,
 )
-from ..errors import ValidationError
 from ..observability.logging import emit_business_event
-from ..xray.ai_domain_manager import ensure_ai_domain_schema
-from ..xray.ai_domain_manager import build_ai_upstream_candidates
+from ..xray.ai_domain_manager import LOCK_BUSY_EXIT_CODE, build_ai_upstream_candidates, ensure_ai_domain_schema
 from ..xray.envfile import load_env_file
-
+from ..xray.operation_lock import LockBusyError, exclusive_file_lock
 
 
 class AiRoutingService:
@@ -190,30 +193,50 @@ class AiRoutingService:
             for item in candidates
         ]
 
-    def _trigger_ai_domain_manager(self):
-        if not AI_DOMAIN_MANAGER_CONTAINER_NAME:
-            raise RuntimeError("AI 域名管理器容器未配置。")
+    def _trigger_ai_domain_manager(self, manual_mode=None):
+        run_options = {}
+        if AI_DOMAIN_MANAGER_EXECUTION_MODE == "local":
+            command = [sys.executable, "-m", "app.xray.ai_domain_manager", "--once"]
+            package_parent = Path(__file__).resolve().parents[2]
+            if not (package_parent / "app").is_dir():
+                package_parent = Path(__file__).resolve().parents[1]
+            run_options["cwd"] = str(package_parent)
+        else:
+            if not AI_DOMAIN_MANAGER_CONTAINER_NAME:
+                raise RuntimeError("AI 域名管理器容器未配置。")
+            command = [
+                AI_DOMAIN_MANAGER_DOCKER_BIN,
+                "exec",
+                AI_DOMAIN_MANAGER_CONTAINER_NAME,
+                "python3",
+                "-m",
+                "app.xray.ai_domain_manager",
+                "--once",
+        ]
+        if manual_mode is not None:
+            command.extend(("--manual-mode", str(manual_mode), "--manual-lock-held"))
         try:
             completed = subprocess.run(
-                [
-                    AI_DOMAIN_MANAGER_DOCKER_BIN,
-                    "exec",
-                    AI_DOMAIN_MANAGER_CONTAINER_NAME,
-                    "python3",
-                    "-m",
-                    "app.xray.ai_domain_manager",
-                    "--once",
-                ],
+                command,
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=240,
+                **run_options,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("AI 路由重算超时，保持原有实际路由。") from exc
+        if completed.returncode == LOCK_BUSY_EXIT_CODE:
+            raise RuntimeError("AI 路由正在应用配置，请稍后重试。")
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "AI 域名管理器执行失败").strip()
             raise RuntimeError(detail[-500:])
+
+    def _manual_mode_lock_path(self):
+        configured = os.environ.get("AI_DOMAIN_MANAGER_MANUAL_LOCK_PATH", "").strip()
+        if configured:
+            return configured
+        return XRAY_CONFIG_PATH.with_name(".ai-domain-manager-manual.lock")
 
     def set_ai_routing_manual_mode(self, mode):
         mode = str(mode or "").strip().lower()
@@ -233,18 +256,42 @@ class AiRoutingService:
             self._panel.set_state(conn, "ai_routing_manual_mode", mode)
             self._panel.set_state(conn, "ai_routing_manual_updated_at", updated_at)
 
-        previous_mode = self.ai_routing_manual_state()["mode"]
-        self._panel.apply_state_update(operation)
+        if mode == "forced_fallback" and not self._panel.data_plane.is_configured():
+            raise ValidationError("数据面未配置，无法应用 AI 回退。")
         try:
-            if mode == "forced_fallback" and not self._panel.data_plane.is_configured():
-                raise ValidationError("数据面未配置，无法应用 AI 回退。")
-            self._trigger_ai_domain_manager()
-        except Exception:
-            def restore(conn):
-                self._panel.set_state(conn, "ai_routing_manual_mode", previous_mode)
-                self._panel.set_state(conn, "ai_routing_manual_updated_at", utc_iso_now())
-            self._panel.apply_state_update(restore)
-            raise
+            # Hold a second shared gate across the child manager and the final
+            # panel-state commit.  Scheduled manager runs take this gate before
+            # their apply lock, preventing an old-mode run from racing the
+            # short interval between node apply and database commit.
+            with exclusive_file_lock(self._manual_mode_lock_path()):
+                previous_mode = self.ai_routing_manual_state()["mode"]
+                # Keep the persisted mode unchanged while the manager applies
+                # the requested mode explicitly.  This prevents a concurrent
+                # resident manager from observing a half-applied mode and
+                # makes a failed request leave both database and node on the
+                # old route.
+                self._trigger_ai_domain_manager(mode)
+                try:
+                    self._panel.apply_state_update(operation)
+                except Exception:
+                    # The node is already on the requested route.  If the
+                    # final panel state commit fails, make a best-effort
+                    # compensating apply so the database and running node do
+                    # not silently diverge.
+                    if previous_mode != mode:
+                        try:
+                            self._trigger_ai_domain_manager(previous_mode)
+                        except Exception as rollback_exc:  # noqa: BLE001 - preserve the original state-commit error
+                            emit_business_event(
+                                "ai_routing.manual_switched",
+                                result="failure",
+                                actor_type="system",
+                                error_code="state_commit_rollback_failed",
+                                message=str(rollback_exc),
+                            )
+                    raise
+        except LockBusyError as exc:
+            raise RuntimeError("AI 路由正在应用配置，请稍后重试。") from exc
         emit_business_event(
             "ai_routing.manual_switched",
             actor_type="admin",
@@ -380,6 +427,7 @@ class AiRoutingService:
             "route_status_label": self._panel.ai_route_status_label(route_status_code, route_status_reason),
             "route_status_tone": self._panel.ai_route_status_tone(route_status_code),
             "config_changed": bool(route_status.get("config_changed")),
+            "config_retried": bool(route_status.get("config_retried")),
             "pending_domains_without_classifier": self._panel.normalize_pending_domain_count(
                 route_status.get("pending_domains_without_classifier", 0)
             ),
@@ -552,6 +600,7 @@ class AiRoutingService:
                     "route_status_label": "暂无报告",
                     "route_status_tone": "warn",
                     "config_changed": False,
+                    "config_retried": False,
                     "pending_domains_without_classifier": 0,
                     "ai_target": None,
                     "panel_target": None,

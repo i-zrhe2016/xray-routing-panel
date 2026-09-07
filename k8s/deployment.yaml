@@ -187,6 +187,9 @@ spec:
               mountPath: /data
               subPath: data
             - name: shared-storage
+              mountPath: /panel-data
+              subPath: data
+            - name: shared-storage
               mountPath: /app/xray/runtime
               subPath: runtime
             - name: shared-storage
