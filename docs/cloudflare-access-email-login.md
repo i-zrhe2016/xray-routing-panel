@@ -16,6 +16,9 @@ https://xray.zrhe2016.cc
 http://100.112.13.103:18080
 ```
 
+该入口用于控制面 Tailscale 内网运维，免管理员登录和 CSRF；公网域名仍必须通过
+Cloudflare Access 和应用鉴权。
+
 ## 登录方式
 
 当前使用 Cloudflare Access **One-time PIN（Email OTP）**，不使用 Google 登录。

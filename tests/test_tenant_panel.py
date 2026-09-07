@@ -548,6 +548,22 @@ class UnifiedAdminLoginTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_internal_panel_host_bypasses_admin_auth_and_csrf(self):
+        headers = {"Host": "100.112.13.103:18080"}
+
+        index = self.client.get("/", headers=headers)
+        self.assertEqual(index.status_code, 200)
+
+        dashboard = self.client.get("/api/dashboard", headers=headers)
+        self.assertEqual(dashboard.status_code, 200)
+
+        client_error = self.client.post(
+            "/api/client-errors",
+            json={"message": "internal test", "source": "test"},
+            headers=headers,
+        )
+        self.assertEqual(client_error.status_code, 202)
+
     def test_admin_login_rejects_external_next_target(self):
         response = self.client.post(
             "/login",

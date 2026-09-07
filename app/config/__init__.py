@@ -148,6 +148,14 @@ AI_DOMAIN_MANAGER_DOCKER_BIN = os.environ.get("AI_DOMAIN_MANAGER_DOCKER_BIN", "d
 
 PANEL_HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
 PANEL_PORT = int(os.environ.get("PANEL_PORT", "18080"))
+PANEL_INTERNAL_HOSTS = frozenset(
+    item.strip().lower().strip("[]")
+    for item in (
+        _parse_csv_env("PANEL_INTERNAL_HOSTS")
+        or ("100.112.13.103",)
+    )
+    if item.strip()
+)
 PANEL_PUBLIC_URL = os.environ.get("PANEL_PUBLIC_URL", "").strip().rstrip("/")
 PANEL_SUBSCRIPTION_PUBLIC_URL = (
     os.environ.get("PANEL_SUBSCRIPTION_PUBLIC_URL", "").strip().rstrip("/")

@@ -48,6 +48,7 @@ AI 上游探测优先从普通数据面执行。若 AI 上游模板或分享链�
 - `PROBE_INTERVAL`
 - `PROBE_TEST_LISTEN_PORT`
 - `PANEL_HEALTH_REQUIRES_XRAY`
+- `PANEL_INTERNAL_HOSTS`：免管理员登录和 CSRF 的内网 Host 列表，默认包含 `100.112.13.103`
 
 Fluent Bit 日志采集使用 `monitoring/fluent-bit/.env`，远端 Loki 使用 `monitoring/loki/.env`，Grafana 使用 `monitoring/.env` 中的 `GRAFANA_LOKI_URL`。三节点生产路径和实际主机角色见 [Fluent Bit 日志采集](logging-fluent-bit.md#当前生产部署)。
 

@@ -32,6 +32,7 @@ from ..config import (
     GRAFANA_OBSERVABILITY_UID,
     GRAFANA_PUBLIC_URL,
     PANEL_HOST,
+    PANEL_INTERNAL_HOSTS,
     PANEL_PORT,
     PANEL_PUBLIC_URL,
     PANEL_SECRET_KEY,
@@ -181,9 +182,25 @@ def initialize_observability():
     return None
 
 
+def is_internal_panel_request():
+    """Return whether the request used a configured private panel host.
+
+    The client source address is not suitable here because a remote Tailscale
+    client has its own address. The destination Host header identifies the
+    private control-plane entry point; public requests use the Cloudflare
+    hostname and do not match this set.
+    """
+    host = request.host.rsplit(":", 1)[0].strip("[]").lower()
+    return host in PANEL_INTERNAL_HOSTS
+
+
 @before_request
 def ensure_basic_auth():
     if request.path in {"/healthz", "/metrics"}:
+        return None
+    if is_internal_panel_request():
+        if AUTH_ENABLED:
+            mark_session_authenticated()
         return None
     if not AUTH_ENABLED:
         return None
@@ -729,6 +746,8 @@ def json_tenant_auth_required():
 def json_validate_csrf():
     # Returns a JSON 400 tuple when the CSRF token is missing/invalid, else None,
     # so JSON endpoints stay JSON instead of aborting to an HTML error page.
+    if is_internal_panel_request():
+        return None
     token = request.headers.get("X-CSRF-Token", "") or request.form.get("csrf_token", "")
     if not validate_csrf_token(token):
         return json_error_response("CSRF token 无效。", 400)
@@ -786,6 +805,8 @@ def get_authenticated_customer():
 
 
 def require_csrf():
+    if is_internal_panel_request():
+        return None
     token = request.headers.get("X-CSRF-Token", "")
     if not token:
         token = request.form.get("csrf_token", "")

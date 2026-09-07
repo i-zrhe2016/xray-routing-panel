@@ -15,6 +15,7 @@ services:
       # Keep the panel reachable from the control-plane Tailscale address
       # (100.112.13.103:18080) as well as local reverse proxies.
       PANEL_HOST: "0.0.0.0"
+      PANEL_INTERNAL_HOSTS: "100.112.13.103"
       PANEL_PUBLIC_URL: "${PANEL_PUBLIC_URL:-https://xray.zrhe2016.cc}"
       PANEL_SUBSCRIPTION_PUBLIC_URL: "${PANEL_SUBSCRIPTION_PUBLIC_URL:-https://sub.xray.zrhe2016.cc}"
       DEFAULT_UPSTREAM_HOST: "127.0.0.1"
