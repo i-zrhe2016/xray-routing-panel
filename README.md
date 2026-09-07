@@ -182,7 +182,6 @@ Admin 控制台的源码与 Vite 构建配置位于 `frontend/`；构建后会�
 - [AI 节点独立凭据](docs/ai-node-credentials.md) — AI inbound/outbound 凭据边界和轮换要求。
 - [Cloudflare Access 邮箱登录](docs/cloudflare-access-email-login.md) — 控制面 Email OTP 登录、Access 策略和源站边界。
 - [内网 SSH 纳管](docs/ssh-key-access.md) — 控制面直连普通数据面的认证、主机指纹校验与验证。
-- [K3s 部署](docs/kubernetes.md) — Kubernetes 分阶段部署结构和边界。
 - [面板迁移](docs/panel-migration.md) — 控制面数据、配置和服务迁移流程。
 - [AWS 普通数据面迁移与回退](docs/aws-normal-data-plane-migration.md) — 普通数据面灰度迁移、AWS 安全组门禁和回退步骤。
 
@@ -230,5 +229,5 @@ Admin 控制台的源码与 Vite 构建配置位于 `frontend/`；构建后会�
 - 不提交 `.env`、REALITY 私钥、Cloudflare Token、数据库快照或灾备归档；SSH 纳管不需要私钥。
 - 控制面与数据面应使用独立主机、独立目录和最小权限凭据。
 - Xray 配置必须先渲染和校验，再同步并确认健康检查、探针和监控恢复。
-- Node Exporter、cAdvisor、Grafana、Loki、Fluent Bit、Kubernetes API 和管理接口应限制到受信任网络。
+- Node Exporter、cAdvisor、Grafana、Loki、Fluent Bit 和管理接口应限制到受信任网络。
 - 数据库备份不能只验证任务成功，还应定期验证实际恢复流程。

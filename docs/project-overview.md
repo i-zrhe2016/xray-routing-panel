@@ -346,7 +346,6 @@ docker compose run --rm xray-routing-panel-db-backup \
 - [db-backup-uploader.md](db-backup-uploader.md): 加密和 R2 上传组件
 - [../Dockerfile](../Dockerfile): 复制静态发布资源并安装 Python 依赖
 - [../docker-compose.yml](../docker-compose.yml): 本地 compose 栈
-- [../k8s/](../k8s/): K3s 清单
 
 ## 开发与测试
 

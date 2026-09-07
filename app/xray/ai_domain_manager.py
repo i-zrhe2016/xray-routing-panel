@@ -2187,10 +2187,9 @@ def _run_once_locked(args):
         if apply_needed:
             pending_apply_path.touch()
         if apply_needed and external_reloader_enabled:
-            # Explicit external-reloader mode (for example Kubernetes' xray-
-            # reloader sidecar) owns the process restart.  The rendered files
-            # are delegated to that watcher instead of requiring a direct
-            # restart command from the manager.
+            # Explicit external-reloader mode lets an external watcher own the
+            # process restart. The rendered files are delegated to that
+            # watcher instead of requiring a direct restart command here.
             config_apply_status = "delegated"
         elif apply_needed and (
             not data_plane_controller.supports_restart() or not data_plane_controller.restart()

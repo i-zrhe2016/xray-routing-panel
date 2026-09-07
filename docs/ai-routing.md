@@ -75,9 +75,9 @@ AI 上游即 AI 节点的公网入口地址。常见配置方式有两种：
 一次性参数传给 AI 管理器；配置实际应用成功后才写入 `panel.db` 的 `app_state`，失败时保持之前
 的人工模式。若面板状态提交失败，系统会尽力把数据面补偿回之前的模式。
 
-Kubernetes 部署由 `xray-reloader` sidecar 监视共享配置并负责重载；此时设置
+如果数据面由外部 watcher 监视共享配置并负责重载，设置
 `DATAPLANE_EXTERNAL_RELOADER_ENABLED=1`，并用 `AI_DOMAIN_MANAGER_EXECUTION_MODE=local` 让面板在同一
-Pod 内调用管理器。管理器会将配置应用标记为 delegated，不要求自身具备数据面重启命令。重试报告
+运行环境内调用管理器。管理器会将配置应用标记为 delegated，不要求自身具备数据面重启命令。重试报告
 会在 `route_status.config_retried` 标记，即使配置内容没有变化，首页也会显示“已重试应用”。
 
 ## 控制台操作

@@ -62,7 +62,7 @@ AI 候选故障不应该触发 DNS 切换。普通数据面继续作为入口，
 
 当前架构无法自动保证：普通数据面故障需要控制面更新 Cloudflare DNS，而控制面同时故障后没有在线组件执行更新。
 
-要保证该场景，必须增加至少一个独立于控制面和普通数据面的组件，例如 Cloudflare Load Balancing / Health Checks、第三台独立 failover controller、独立 Kubernetes operator 或云厂商健康检查。
+要保证该场景，必须增加至少一个独立于控制面和普通数据面的组件，例如 Cloudflare Load Balancing / Health Checks、第三台独立 failover controller 或云厂商健康检查。
 
 ### 控制面故障时的管理服务
 

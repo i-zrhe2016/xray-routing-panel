@@ -16,7 +16,7 @@
 | 普通数据面 | 远端实际 `config.json`、远端 `.env` | `panel-ports.json`、`dynamic-routing.json`、客户端测试产物、最新 AI 报告 |
 | AI 数据面 | 远端模式：远端 `config.json` + `.env`；本机 Docker 模式：控制面 `config-ai-node.json` + `.env` | — |
 
-普通数据面默认通过内网直连的严格只读 SSH 采集，AI 节点有远端目标时同样采集；本机 Docker AI 节点直接读取控制面运行时目录。SSH 登录私钥、known_hosts、Kubernetes Secret 和 R2 密钥不进入归档，必须放在独立的 Secret 管理位置。
+普通数据面默认通过内网直连的严格只读 SSH 采集，AI 节点有远端目标时同样采集；本机 Docker AI 节点直接读取控制面运行时目录。SSH 登录私钥、known_hosts、部署 Secret 和 R2 密钥不进入归档，必须放在独立的 Secret 管理位置。
 
 默认远端路径如下；部署目录不同时必须显式设置 `DB_BACKUP_DATAPLANE_REMOTE_PATHS`：
 

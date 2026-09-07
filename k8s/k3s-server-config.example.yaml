@@ -1,7 +1,0 @@
-write-kubeconfig-mode: "0644"
-tls-san:
-  - your-node-or-domain
-disable:
-  - traefik
-# Optional:
-# - servicelb
