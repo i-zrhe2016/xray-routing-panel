@@ -20,6 +20,7 @@ from urllib.parse import parse_qsl, unquote, urlparse
 from app.xray.config import BASE_DIR, DEFAULT_RENDER_MODULE
 from app.xray.envfile import load_env_file as shared_load_env_file
 from app.xray.envfile import read_env_or_file as shared_read_env_or_file
+from app.xray.file_io import write_text_atomic
 from app.xray.node_control import DataPlaneConfig, DataPlaneController, reality_handshake_probe
 from app.xray.operation_lock import LockBusyError, exclusive_file_lock
 
@@ -244,7 +245,7 @@ def load_json(path, default):
 
 def save_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    write_text_atomic(path, json.dumps(payload, indent=2, ensure_ascii=True) + "\n")
 
 
 def normalize_log_state(state):
@@ -1276,15 +1277,23 @@ def probe_ai_upstream_candidate(candidate, timeout_seconds, probe_controller=Non
 
 
 def summarize_ai_target_candidate(candidate):
+    host = str(candidate.get("upstream_host", "")).strip()
+    port = candidate.get("upstream_port")
+    try:
+        port = int(port) if port is not None and str(port).strip() else None
+    except (TypeError, ValueError):
+        port = None
     summary = {
-        "upstream_host": candidate["upstream_host"],
-        "upstream_port": int(candidate["upstream_port"]),
         "candidate_type": candidate.get("candidate_type", "template"),
         "is_reachable": bool(candidate.get("is_reachable")),
         "failure_reason": str(candidate.get("failure_reason", "")).strip(),
         "checked_at": str(candidate.get("checked_at", "")).strip(),
         "probe_method": str(candidate.get("probe_method", "tcp")).strip() or "tcp",
     }
+    if host:
+        summary["upstream_host"] = host
+    if port:
+        summary["upstream_port"] = port
     if candidate.get("probe_management_error"):
         summary["probe_management_error"] = True
     label = str(candidate.get("candidate_label", "")).strip()
@@ -1295,7 +1304,15 @@ def summarize_ai_target_candidate(candidate):
 
 def summarize_ai_target_for_report(ai_target):
     if ai_target.get("probe_status") == "manual_fallback":
-        return dict(ai_target)
+        candidates = ai_target.get("candidates", [])
+        if not isinstance(candidates, list):
+            candidates = []
+        return {
+            "probe_status": "manual_fallback",
+            "failure_reason": str(ai_target.get("failure_reason", "")).strip(),
+            "is_reachable": False,
+            "candidates": list(candidates),
+        }
     summary = summarize_ai_target_candidate(ai_target)
     for key in (
         "selected_index",
@@ -1311,7 +1328,8 @@ def summarize_ai_target_for_report(ai_target):
     failure_reason = str(ai_target.get("failure_reason", "")).strip()
     if failure_reason:
         summary["failure_reason"] = failure_reason
-    summary["candidates"] = list(ai_target.get("candidates", []))
+    candidates = ai_target.get("candidates", [])
+    summary["candidates"] = list(candidates) if isinstance(candidates, list) else []
     return summary
 
 
@@ -1578,11 +1596,17 @@ def build_domain_report(state, cutoff, now, decisions, ai_target, panel_target, 
             }
         if route_status_code == "applied":
             target = None
-            if isinstance(ai_target, dict) and ai_target.get("upstream_host"):
-                target = {
-                    "upstream_host": ai_target["upstream_host"],
-                    "upstream_port": int(ai_target["upstream_port"]),
-                }
+            if isinstance(ai_target, dict):
+                target_host = str(ai_target.get("upstream_host", "")).strip()
+                try:
+                    target_port = int(ai_target.get("upstream_port"))
+                except (TypeError, ValueError):
+                    target_port = None
+                if target_host and target_port:
+                    target = {
+                        "upstream_host": target_host,
+                        "upstream_port": target_port,
+                    }
             return {
                 "outbound_tag": "ai_proxy",
                 "path": "ai_node",
@@ -1669,7 +1693,7 @@ def build_domain_report(state, cutoff, now, decisions, ai_target, panel_target, 
             {"protocol": protocol, "hits": hits}
             for protocol, hits in sorted(protocols.items())
         ],
-        "ai_target": summarize_ai_target_for_report(ai_target) if ai_target else None,
+        "ai_target": summarize_ai_target_for_report(ai_target) if isinstance(ai_target, dict) else None,
         "panel_target": panel_target,
         "route_status": route_status,
     }
@@ -1686,8 +1710,8 @@ def write_domain_report(output_dir, report):
     history_txt = history_dir / f"{stamp}.txt"
 
     payload = json.dumps(report, indent=2, ensure_ascii=True) + "\n"
-    latest_json.write_text(payload, encoding="utf-8")
-    history_json.write_text(payload, encoding="utf-8")
+    write_text_atomic(latest_json, payload)
+    write_text_atomic(history_json, payload)
 
     lines = [
         f"generated_at: {report['generated_at']}",
@@ -1709,27 +1733,42 @@ def write_domain_report(output_dir, report):
             f"observations={report['panel_db_status'].get('observations_upserted', 0)})"
         )
     if report.get("ai_target"):
-        lines.append(
-            "ai_target: "
-            f"{report['ai_target']['upstream_host']}:{report['ai_target']['upstream_port']}"
-        )
-        if report["ai_target"].get("candidate_count", 0) > 1:
-            lines.append(
-                "ai_target_selection: "
-                f"{report['ai_target']['selected_number']}/{report['ai_target']['candidate_count']} "
-                f"({'fallback' if report['ai_target'].get('failover_active') else 'primary'})"
-            )
-        if report["ai_target"].get("probe_status"):
-            lines.append(f"ai_target_probe_status: {report['ai_target']['probe_status']}")
-        candidates = report["ai_target"].get("candidates", [])
-        if candidates:
-            lines.append(
-                "ai_target_candidates: "
-                + ", ".join(
-                    f"{item['upstream_host']}:{item['upstream_port']}({'ok' if item['is_reachable'] else 'down'})"
-                    for item in candidates
+        target = report["ai_target"]
+        if not isinstance(target, dict):
+            lines.append("ai_target: unavailable")
+        else:
+            target_host = str(target.get("upstream_host", "")).strip()
+            target_port = target.get("upstream_port")
+            if target_host and target_port:
+                lines.append(f"ai_target: {target_host}:{target_port}")
+            else:
+                lines.append("ai_target: unavailable")
+            try:
+                candidate_count = int(target.get("candidate_count", 0) or 0)
+            except (TypeError, ValueError):
+                candidate_count = 0
+            if candidate_count > 1:
+                lines.append(
+                    "ai_target_selection: "
+                    f"{target.get('selected_number', '?')}/{candidate_count} "
+                    f"({'fallback' if target.get('failover_active') else 'primary'})"
                 )
-            )
+            if target.get("probe_status"):
+                lines.append(f"ai_target_probe_status: {target['probe_status']}")
+            candidates = target.get("candidates", [])
+            if candidates:
+                candidate_lines = []
+                for item in candidates:
+                    if not isinstance(item, dict):
+                        continue
+                    host = str(item.get("upstream_host", "")).strip()
+                    port = item.get("upstream_port")
+                    if host and port:
+                        candidate_lines.append(
+                            f"{host}:{port}({'ok' if item.get('is_reachable') else 'down'})"
+                        )
+                if candidate_lines:
+                    lines.append("ai_target_candidates: " + ", ".join(candidate_lines))
     if report["panel_target"]:
         lines.append(
             "panel_target: "
@@ -1748,8 +1787,8 @@ def write_domain_report(output_dir, report):
     else:
         lines.append("no domains observed in the last window")
     text = "\n".join(lines) + "\n"
-    latest_txt.write_text(text, encoding="utf-8")
-    history_txt.write_text(text, encoding="utf-8")
+    write_text_atomic(latest_txt, text)
+    write_text_atomic(history_txt, text)
 
 
 def rerender_config(render_script, env_file, config_out, client_out, share_out, dynamic_routing_file):
@@ -1816,9 +1855,14 @@ def restart_xray_command(command, timeout_seconds):
 def build_data_plane_controller(args):
     upstream_host = ""
     upstream_port = None
-    if getattr(args, "ai_upstream_candidates", None):
-        upstream_host = str(args.ai_upstream_candidates[0]["upstream_host"])
-        upstream_port = int(args.ai_upstream_candidates[0]["upstream_port"])
+    candidates = getattr(args, "ai_upstream_candidates", None)
+    first_candidate = candidates[0] if isinstance(candidates, (list, tuple)) and candidates else {}
+    if isinstance(first_candidate, dict):
+        upstream_host = str(first_candidate.get("upstream_host", "")).strip()
+        try:
+            upstream_port = int(first_candidate.get("upstream_port"))
+        except (TypeError, ValueError):
+            upstream_port = None
     access_log_path = str(getattr(args, "data_plane_access_log_path", "") or "").strip()
     if not access_log_path and args.data_plane_ssh_target and args.data_plane_config_path:
         config_path = Path(args.data_plane_config_path)
@@ -2083,24 +2127,52 @@ def _run_once_locked(args):
     pending_apply_path = args.config_out.with_name(args.config_out.name + ".pending-apply")
     pending_apply = pending_apply_path.exists()
     pending_apply_path.parent.mkdir(parents=True, exist_ok=True)
-    # Persist before rendering/syncing: either can update files before failing.
-    # A later invocation must retry even if the generated files no longer differ.
-    pending_apply_path.touch()
-    rerender_config(
-        args.render_script,
-        args.env_file,
-        args.config_out,
-        args.client_out,
-        args.share_out,
-        args.dynamic_routing_path,
-    )
+    # The marker means that a complete, rendered configuration is ready for a
+    # restart. Creating it before rendering lets an external watcher consume
+    # the old configuration if rendering fails in the middle of a cycle.
+    # Keep an existing marker for a previous failed apply, and only create a
+    # new one after the renderer has returned successfully.
+    try:
+        rerender_config(
+            args.render_script,
+            args.env_file,
+            args.config_out,
+            args.client_out,
+            args.share_out,
+            args.dynamic_routing_path,
+        )
+    except Exception:
+        # Rendering is expected to use atomic artifact writes. If a custom
+        # renderer nevertheless replaced the config before failing, preserve
+        # a retry signal for the external watcher; otherwise an existing
+        # marker remains untouched for the next manager cycle.
+        current_config = args.config_out.read_text(encoding="utf-8") if args.config_out.is_file() else ""
+        if not pending_apply and current_config != previous_config:
+            pending_apply_path.touch()
+        raise
     current_config = args.config_out.read_text(encoding="utf-8") if args.config_out.is_file() else ""
     config_changed = current_config != previous_config
     config_retried = pending_apply
+    if config_changed or pending_apply:
+        # The local render is complete, so a marker created here is safe for
+        # an external watcher to consume even if a later remote sync/restart
+        # step fails.
+        pending_apply_path.touch()
     remote_config_changed = False
     config_apply_status = "not_needed"
     apply_needed = config_changed or pending_apply
-    if data_plane_controller.is_configured():
+    external_reloader_enabled = getattr(args, "data_plane_external_reloader_enabled", False)
+    if not isinstance(external_reloader_enabled, bool):
+        external_reloader_enabled = False
+    # An unmanaged controller may still carry the AI upstream address for
+    # reachability probes. That address is not a restart mechanism: without an
+    # explicit external watcher, classify the apply as unmanaged instead of
+    # raising a reload failure that can never be recovered by this process.
+    managed_data_plane = data_plane_controller.is_configured() and (
+        getattr(data_plane_controller, "mode", "") != "unmanaged"
+        or external_reloader_enabled
+    )
+    if managed_data_plane:
         # Sync on every management cycle. The rendered config can be unchanged
         # while the remote source fragment was deleted or replaced manually;
         # keeping both artifacts synchronized makes the next panel render safe.
@@ -2108,11 +2180,12 @@ def _run_once_locked(args):
         if data_plane_controller.supports_sync():
             synced_paths = data_plane_controller.sync_generated_files(validate_config=True)
             remote_config_path = str(getattr(args, "data_plane_config_path", "") or "").strip()
-            remote_config_changed = bool(remote_config_path and remote_config_path in {str(path) for path in synced_paths})
+            remote_config_changed = bool(
+                remote_config_path and remote_config_path in {str(path) for path in synced_paths}
+            )
         apply_needed = config_changed or remote_config_changed or pending_apply
-        external_reloader_enabled = getattr(args, "data_plane_external_reloader_enabled", False)
-        if not isinstance(external_reloader_enabled, bool):
-            external_reloader_enabled = False
+        if apply_needed:
+            pending_apply_path.touch()
         if apply_needed and external_reloader_enabled:
             # Explicit external-reloader mode (for example Kubernetes' xray-
             # reloader sidecar) owns the process restart.  The rendered files
@@ -2127,19 +2200,27 @@ def _run_once_locked(args):
             config_apply_status = "direct"
         else:
             config_apply_status = "unchanged"
-        pending_apply_path.unlink(missing_ok=True)
-    elif (config_changed or pending_apply) and args.restart_command:
+        if config_apply_status != "delegated":
+            pending_apply_path.unlink(missing_ok=True)
+    elif (config_changed or pending_apply) and args.restart_command and not external_reloader_enabled:
         restart_xray_command(args.restart_command, args.docker_timeout_seconds)
         config_apply_status = "direct"
         pending_apply_path.unlink(missing_ok=True)
-    elif (config_changed or pending_apply) and args.restart_container_name:
+    elif (config_changed or pending_apply) and args.restart_container_name and not external_reloader_enabled:
         restart_xray_container(args.restart_container_name, args.docker_timeout_seconds)
         config_apply_status = "direct"
         pending_apply_path.unlink(missing_ok=True)
     elif apply_needed:
-        config_apply_status = "unmanaged"
-        if manual_mode_override.strip():
+        if external_reloader_enabled:
+            # An explicitly enabled watcher remains the sole restart owner,
+            # even when the controller has no local/remote management mode.
+            config_apply_status = "delegated"
+        else:
+            config_apply_status = "unmanaged"
+        if config_apply_status == "unmanaged" and manual_mode_override.strip():
             raise RuntimeError("AI 路由配置重载未配置，保留待应用状态以便重试。")
+        if config_apply_status != "delegated":
+            pending_apply_path.unlink(missing_ok=True)
 
     # Once the config has been synchronized and the reload has succeeded (or
     # been delegated to an external watcher), reporting is bookkeeping.  A

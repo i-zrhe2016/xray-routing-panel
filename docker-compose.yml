@@ -27,6 +27,11 @@ services:
       XRAY_ACCESS_LOG_PATH: "/app/xray/logs/access.log"
       XRAY_CLIENT_CONFIG_PATH: "/app/xray/runtime/client-test.json"
       AI_ROUTING_ENABLED: "${AI_ROUTING_ENABLED:-1}"
+      # The panel and the one-shot manager share this container in local mode;
+      # point both at the same database and runtime execution strategy.
+      AI_DOMAIN_MANAGER_EXECUTION_MODE: "${AI_DOMAIN_MANAGER_EXECUTION_MODE:-docker}"
+      PANEL_DB_PATH: "/data/panel.db"
+      DATAPLANE_EXTERNAL_RELOADER_ENABLED: "${DATAPLANE_EXTERNAL_RELOADER_ENABLED:-0}"
       DATAPLANE_SSH_TARGET: "${DATAPLANE_SSH_TARGET:-root@100.116.187.106}"
       DATAPLANE_SSH_OPTIONS: "${DATAPLANE_SSH_OPTIONS:-}"
       DATAPLANE_SSH_KNOWN_HOSTS: "${DATAPLANE_SSH_KNOWN_HOSTS:-/root/.ssh/known_hosts}"

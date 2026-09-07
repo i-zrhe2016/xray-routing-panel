@@ -84,6 +84,10 @@ DATAPLANE_PANEL_DB_PATH = os.environ.get("DATAPLANE_PANEL_DB_PATH", "").strip()
 DATAPLANE_PANEL_PORTS_PATH = os.environ.get("DATAPLANE_PANEL_PORTS_PATH", "").strip()
 DATAPLANE_ACCESS_LOG_PATH = os.environ.get("DATAPLANE_ACCESS_LOG_PATH", "").strip()
 DATAPLANE_PROBE_HOST = os.environ.get("DATAPLANE_PROBE_HOST", "127.0.0.1").strip() or "127.0.0.1"
+DATAPLANE_EXTERNAL_RELOADER_ENABLED = parse_bool_env(
+    os.environ.get("DATAPLANE_EXTERNAL_RELOADER_ENABLED"),
+    default=False,
+)
 
 AI_NODE_SSH_TARGET = os.environ.get(
     "AI_NODE_SSH_TARGET", ""

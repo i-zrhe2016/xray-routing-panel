@@ -205,6 +205,32 @@ class AiDomainManagerTest(unittest.TestCase):
         self.assertEqual(domains["chatgpt.com"]["traffic_route"]["target"]["upstream_host"], "nat.qq.pw")
         self.assertEqual(domains["example.com"]["traffic_route"]["outbound_tag"], "direct")
 
+    def test_forced_fallback_report_has_no_fake_upstream_and_writes_text(self):
+        now = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
+        report = ai_domain_manager.build_domain_report(
+            {"events": []},
+            now - timedelta(hours=1),
+            now,
+            {"domains": {}},
+            {
+                "probe_status": "manual_fallback",
+                "failure_reason": "manual_override",
+                "is_reachable": False,
+                "candidates": [],
+            },
+            None,
+            {"status": "manual_fallback", "reason": "manual_override"},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            ai_domain_manager.write_domain_report(output_dir, report)
+            saved_report = json.loads((output_dir / "latest.json").read_text(encoding="utf-8"))
+            saved_text = (output_dir / "latest.txt").read_text(encoding="utf-8")
+
+        self.assertNotIn("upstream_host", saved_report["ai_target"])
+        self.assertIn("ai_target: unavailable", saved_text)
+
     def test_read_ai_routing_manual_mode_defaults_and_reads_persisted_value(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "panel.db"
@@ -338,8 +364,121 @@ class AiDomainManagerTest(unittest.TestCase):
                 mock.patch.object(ai_domain_manager, "save_log_state"), \
                 mock.patch.object(ai_domain_manager, "save_json"):
                 result = ai_domain_manager.run_once(args)
+                self.assertTrue((root / "runtime" / "config.json.pending-apply").exists())
 
         self.assertEqual(result["config_apply_status"], "delegated")
+        controller.restart.assert_not_called()
+
+    def test_run_once_does_not_signal_external_reloader_before_failed_render(self):
+        controller = mock.Mock()
+        controller.is_configured.return_value = True
+        controller.mode = "local"
+        controller.supports_sync.return_value = False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_out = root / "runtime" / "config.json"
+            config_out.parent.mkdir()
+            config_out.write_text("old", encoding="utf-8")
+            args = mock.Mock(
+                log_state_path=root / "log-state.json",
+                log_path=root / "access.log",
+                lookback_seconds=3600,
+                classification_state_path=root / "decisions.json",
+                panel_db_path=root / "panel.db",
+                panel_route_listen_port=None,
+                ai_upstream_candidates=[{"upstream_host": "ai.example.com", "upstream_port": 27166}],
+                ai_upstream_probe_timeout_seconds=2.0,
+                batch_size=50,
+                codex_classifier_enabled=False,
+                openai_classifier_enabled=False,
+                proxy_template_path=root / "missing-template.json",
+                dynamic_routing_path=root / "runtime" / "dynamic-routing.json",
+                config_out=config_out,
+                client_out=root / "runtime" / "client-test.json",
+                share_out=root / "runtime" / "client-share.txt",
+                data_plane_config_path=str(config_out),
+                data_plane_external_reloader_enabled=True,
+                restart_command="",
+                restart_container_name="",
+                docker_timeout_seconds=5,
+                report_output_dir=root / "reports",
+            )
+
+            with mock.patch.object(ai_domain_manager, "build_data_plane_controller", return_value=controller), \
+                mock.patch.object(ai_domain_manager, "sync_log"), \
+                mock.patch.object(ai_domain_manager, "sync_builtin_domain_decisions"), \
+                mock.patch.object(ai_domain_manager, "read_ai_routing_manual_mode", return_value="auto"), \
+                mock.patch.object(
+                    ai_domain_manager,
+                    "select_ai_target",
+                    return_value={"probe_status": "all_reachable", "is_reachable": True, "candidates": []},
+                ), \
+                mock.patch.object(ai_domain_manager, "rerender_config", side_effect=RuntimeError("render failed")):
+                with self.assertRaisesRegex(RuntimeError, "render failed"):
+                    ai_domain_manager.run_once(args)
+
+            self.assertFalse(config_out.with_name("config.json.pending-apply").exists())
+
+    def test_run_once_reports_unmanaged_data_plane_without_attempting_restart(self):
+        controller = mock.Mock()
+        controller.is_configured.return_value = True
+        controller.mode = "unmanaged"
+        controller.supports_sync.return_value = False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_out = root / "runtime" / "config.json"
+            config_out.parent.mkdir()
+            config_out.write_text("old", encoding="utf-8")
+            dynamic_routing_path = root / "runtime" / "dynamic-routing.json"
+            args = mock.Mock(
+                log_state_path=root / "log-state.json",
+                log_path=root / "access.log",
+                lookback_seconds=3600,
+                classification_state_path=root / "decisions.json",
+                panel_db_path=root / "panel.db",
+                panel_route_listen_port=None,
+                ai_upstream_candidates=[{"upstream_host": "ai.example.com", "upstream_port": 27166}],
+                ai_upstream_probe_timeout_seconds=2.0,
+                batch_size=50,
+                codex_classifier_enabled=False,
+                openai_classifier_enabled=False,
+                proxy_template_path=root / "missing-template.json",
+                dynamic_routing_path=dynamic_routing_path,
+                render_script="app.xray.render_config",
+                env_file=root / "xray.env",
+                config_out=config_out,
+                client_out=root / "runtime" / "client-test.json",
+                share_out=root / "runtime" / "client-share.txt",
+                data_plane_config_path="/etc/xray/config.json",
+                data_plane_external_reloader_enabled=False,
+                restart_command="",
+                restart_container_name="",
+                docker_timeout_seconds=5,
+                report_output_dir=root / "reports",
+            )
+
+            def render(*_args):
+                config_out.write_text("new", encoding="utf-8")
+
+            with mock.patch.object(ai_domain_manager, "build_data_plane_controller", return_value=controller), \
+                mock.patch.object(ai_domain_manager, "sync_log"), \
+                mock.patch.object(ai_domain_manager, "sync_builtin_domain_decisions"), \
+                mock.patch.object(ai_domain_manager, "read_ai_routing_manual_mode", return_value="auto"), \
+                mock.patch.object(
+                    ai_domain_manager,
+                    "select_ai_target",
+                    return_value={"probe_status": "all_reachable", "is_reachable": True, "candidates": []},
+                ), \
+                mock.patch.object(ai_domain_manager, "rerender_config", side_effect=render), \
+                mock.patch.object(ai_domain_manager, "save_ai_domains_to_panel_db", return_value={}), \
+                mock.patch.object(ai_domain_manager, "write_domain_report"), \
+                mock.patch.object(ai_domain_manager, "save_log_state"), \
+                mock.patch.object(ai_domain_manager, "save_json"):
+                result = ai_domain_manager.run_once(args)
+
+        self.assertEqual(result["config_apply_status"], "unmanaged")
         controller.restart.assert_not_called()
 
     def _check_run_once_recovery(

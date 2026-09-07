@@ -25,6 +25,7 @@ from ..helpers import (
     utc_iso_now,
     utc_now,
 )
+from ..xray.operation_lock import LockBusyError, exclusive_file_lock
 
 from ._constants import PLAN_SLUG_RE
 
@@ -902,144 +903,155 @@ class CommerceService:
         if len(note_text) > 300:
             raise ValidationError("审核备注不能超过 300 个字符。")
 
-        with self._panel.write_lock:
-            self._panel.sync_traffic_state_locked()
-            with self._panel.connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    self._panel.expire_pending_orders_in_tx(conn)
-                    order = conn.execute(
-                        """
-                        SELECT
-                            o.*,
-                            c.email AS customer_email
-                        FROM orders o
-                        JOIN customers c ON c.id = o.customer_id
-                        WHERE o.id = ?
-                        LIMIT 1
-                        """,
-                        (order_id,),
-                    ).fetchone()
-                    if order is None:
-                        raise ValidationError("订单不存在。")
-                    if order["status"] != "payment_submitted":
-                        raise ValidationError("当前订单状态不允许审核开通。")
+        try:
+            # Acquire the same cross-process lock before opening the SQLite
+            # write transaction. The resident AI manager follows this order as
+            # well, avoiding a DB-lock/file-lock inversion during a fulfilment.
+            with exclusive_file_lock(self._panel._ai_manager_apply_lock_path()):
+                with self._panel.write_lock:
+                    self._panel.sync_traffic_state_locked()
+                    with self._panel.connect() as conn:
+                        conn.execute("BEGIN IMMEDIATE")
+                        try:
+                            self._panel.expire_pending_orders_in_tx(conn)
+                            order = conn.execute(
+                                """
+                                SELECT
+                                    o.*,
+                                    c.email AS customer_email
+                                FROM orders o
+                                JOIN customers c ON c.id = o.customer_id
+                                WHERE o.id = ?
+                                LIMIT 1
+                                """,
+                                (order_id,),
+                            ).fetchone()
+                            if order is None:
+                                raise ValidationError("订单不存在。")
+                            if order["status"] != "payment_submitted":
+                                raise ValidationError("当前订单状态不允许审核开通。")
 
-                    now_text = utc_iso_now()
-                    service_expires_at = self._panel.compute_service_expiry(order["duration_days_snapshot"])
-                    service_subscription_id = order["service_subscription_id"]
+                            now_text = utc_iso_now()
+                            service_expires_at = self._panel.compute_service_expiry(order["duration_days_snapshot"])
+                            service_subscription_id = order["service_subscription_id"]
 
-                    if order["kind"] == "new_purchase":
-                        listen_port = self._panel.allocate_auto_port_in_tx(conn)
-                        conn.execute(
-                            """
-                            INSERT INTO ports (
-                                listen_port, upstream_host, upstream_port,
-                                tenant_token, subscription_token, tenant_username, tenant_password,
-                                expires_at, traffic_limit_bytes, enabled, note,
-                                customer_id, service_subscription_id, source_order_id,
-                                created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?)
-                            """,
-                            (
-                                listen_port,
-                                DEFAULT_UPSTREAM_HOST,
-                                DEFAULT_UPSTREAM_PORT,
-                                self._panel.generate_unique_port_token(conn, "tenant_token"),
-                                self._panel.generate_unique_port_token(conn, "subscription_token"),
-                                self._panel.generate_unique_tenant_username(conn),
-                                generate_tenant_password(),
-                                service_expires_at,
-                                order["traffic_limit_bytes_snapshot"],
-                                self._panel.build_service_note(order["customer_email"], order["plan_name_snapshot"]),
-                                order["customer_id"],
-                                order["id"],
-                                now_text,
-                                now_text,
-                            ),
-                        )
-                        port_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                        conn.execute(
-                            """
-                            INSERT INTO service_subscriptions (
-                                customer_id, plan_id, port_id, source_order_id, latest_order_id, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                order["customer_id"],
-                                order["plan_id"],
-                                port_id,
-                                order["id"],
-                                order["id"],
-                                now_text,
-                                now_text,
-                            ),
-                        )
-                        service_subscription_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                        conn.execute(
-                            """
-                            UPDATE ports
-                            SET service_subscription_id = ?
-                            WHERE id = ?
-                            """,
-                            (service_subscription_id, port_id),
-                        )
-                    else:
-                        service_row = self._panel.get_service_subscription_row_in_tx(
-                            conn,
-                            order["service_subscription_id"],
-                            customer_id=order["customer_id"],
-                        )
-                        if service_row is None or service_row.get("port_id") is None:
-                            raise ValidationError("续费目标服务不存在。")
-                        port_id = int(service_row["port_id"])
-                        conn.execute(
-                            """
-                            UPDATE ports
-                            SET expires_at = ?, traffic_limit_bytes = ?, enabled = 1, updated_at = ?
-                            WHERE id = ?
-                            """,
-                            (
-                                service_expires_at,
-                                order["traffic_limit_bytes_snapshot"],
-                                now_text,
-                                port_id,
-                            ),
-                        )
-                        self._panel.reset_port_usage_in_tx(conn, service_row["listen_port"])
-                        conn.execute(
-                            """
-                            UPDATE service_subscriptions
-                            SET latest_order_id = ?, plan_id = ?, updated_at = ?
-                            WHERE id = ?
-                            """,
-                            (
-                                order["id"],
-                                order["plan_id"],
-                                now_text,
-                                order["service_subscription_id"],
-                            ),
-                        )
-                        service_subscription_id = order["service_subscription_id"]
+                            if order["kind"] == "new_purchase":
+                                listen_port = self._panel.allocate_auto_port_in_tx(conn)
+                                conn.execute(
+                                    """
+                                    INSERT INTO ports (
+                                        listen_port, upstream_host, upstream_port,
+                                        tenant_token, subscription_token, tenant_username, tenant_password,
+                                        expires_at, traffic_limit_bytes, enabled, note,
+                                        customer_id, service_subscription_id, source_order_id,
+                                        created_at, updated_at
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?)
+                                    """,
+                                    (
+                                        listen_port,
+                                        DEFAULT_UPSTREAM_HOST,
+                                        DEFAULT_UPSTREAM_PORT,
+                                        self._panel.generate_unique_port_token(conn, "tenant_token"),
+                                        self._panel.generate_unique_port_token(conn, "subscription_token"),
+                                        self._panel.generate_unique_tenant_username(conn),
+                                        generate_tenant_password(),
+                                        service_expires_at,
+                                        order["traffic_limit_bytes_snapshot"],
+                                        self._panel.build_service_note(
+                                            order["customer_email"], order["plan_name_snapshot"]
+                                        ),
+                                        order["customer_id"],
+                                        order["id"],
+                                        now_text,
+                                        now_text,
+                                    ),
+                                )
+                                port_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                                conn.execute(
+                                    """
+                                    INSERT INTO service_subscriptions (
+                                        customer_id, plan_id, port_id, source_order_id, latest_order_id, created_at, updated_at
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        order["customer_id"],
+                                        order["plan_id"],
+                                        port_id,
+                                        order["id"],
+                                        order["id"],
+                                        now_text,
+                                        now_text,
+                                    ),
+                                )
+                                service_subscription_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                                conn.execute(
+                                    """
+                                    UPDATE ports
+                                    SET service_subscription_id = ?
+                                    WHERE id = ?
+                                    """,
+                                    (service_subscription_id, port_id),
+                                )
+                            else:
+                                service_row = self._panel.get_service_subscription_row_in_tx(
+                                    conn,
+                                    order["service_subscription_id"],
+                                    customer_id=order["customer_id"],
+                                )
+                                if service_row is None or service_row.get("port_id") is None:
+                                    raise ValidationError("续费目标服务不存在。")
+                                port_id = int(service_row["port_id"])
+                                conn.execute(
+                                    """
+                                    UPDATE ports
+                                    SET expires_at = ?, traffic_limit_bytes = ?, enabled = 1, updated_at = ?
+                                    WHERE id = ?
+                                    """,
+                                    (
+                                        service_expires_at,
+                                        order["traffic_limit_bytes_snapshot"],
+                                        now_text,
+                                        port_id,
+                                    ),
+                                )
+                                self._panel.reset_port_usage_in_tx(conn, service_row["listen_port"])
+                                conn.execute(
+                                    """
+                                    UPDATE service_subscriptions
+                                    SET latest_order_id = ?, plan_id = ?, updated_at = ?
+                                    WHERE id = ?
+                                    """,
+                                    (
+                                        order["id"],
+                                        order["plan_id"],
+                                        now_text,
+                                        order["service_subscription_id"],
+                                    ),
+                                )
+                                service_subscription_id = order["service_subscription_id"]
 
-                    self._panel.mark_latest_payment_submission_reviewed_in_tx(conn, order["id"], "approved", note_text)
-                    conn.execute(
-                        """
-                        UPDATE orders
-                        SET status = 'fulfilled',
-                            fulfilled_at = ?,
-                            rejection_reason = '',
-                            service_subscription_id = ?,
-                            updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (now_text, service_subscription_id, now_text, order["id"]),
-                    )
-                    self._panel.disable_auto_stopped_ports_in_tx(conn)
-                    self._panel.persist_and_reload(conn, reload_xray=True)
-                except Exception:
-                    conn.rollback()
-                    raise
+                            self._panel.mark_latest_payment_submission_reviewed_in_tx(
+                                conn, order["id"], "approved", note_text
+                            )
+                            conn.execute(
+                                """
+                                UPDATE orders
+                                SET status = 'fulfilled',
+                                    fulfilled_at = ?,
+                                    rejection_reason = '',
+                                    service_subscription_id = ?,
+                                    updated_at = ?
+                                WHERE id = ?
+                                """,
+                                (now_text, service_subscription_id, now_text, order["id"]),
+                            )
+                            self._panel.disable_auto_stopped_ports_in_tx(conn)
+                            self._panel._persist_and_reload_locked(conn, reload_xray=True)
+                        except Exception:
+                            conn.rollback()
+                            raise
+        except LockBusyError as exc:
+            self._panel._raise_apply_lock_busy(exc)
     def reject_order(self, order_id, review_note=""):
         note_text = str(review_note or "").strip()
         if not note_text:

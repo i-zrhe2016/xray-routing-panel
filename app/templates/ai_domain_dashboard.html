@@ -171,8 +171,10 @@
             <div class="info-tile">
               <span>AI 目标</span>
               <strong>
-                {% if dashboard.report.ai_target %}
+                {% if dashboard.report.ai_target and dashboard.report.ai_target.upstream_host and dashboard.report.ai_target.upstream_port %}
                 {{ dashboard.report.ai_target.upstream_host }}:{{ dashboard.report.ai_target.upstream_port }}
+                {% elif dashboard.report.ai_target %}
+                不可用
                 {% else %}
                 暂无
                 {% endif %}

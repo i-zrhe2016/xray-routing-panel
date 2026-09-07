@@ -10,6 +10,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.xray.file_io import write_text_atomic
+
 
 REMOTE_FILE_DELTA_SCRIPT = """
 from datetime import datetime, timezone
@@ -606,6 +608,32 @@ class DataPlaneController:
     def _run_remote_shell(self, shell_command, error_prefix, timeout=None):
         return self._run_remote(["sh", "-lc", shell_command], error_prefix, timeout=timeout)
 
+    def _sync_text_file_to_remote(self, content, target_path, error_prefix, validate_config=False):
+        """Upload a generated text artifact through a unique remote temp path."""
+
+        remote_tmp = build_temp_target_path(target_path)
+        try:
+            self._run_remote(
+                ["python3", "-c", REMOTE_WRITE_FILE_SCRIPT, remote_tmp],
+                f"{error_prefix}上传失败",
+                input_text=content,
+            )
+            if validate_config:
+                self.test_config(config_path=remote_tmp)
+            return self._run_remote(
+                ["python3", "-c", REMOTE_REPLACE_FILE_SCRIPT, remote_tmp, target_path],
+                f"{error_prefix}替换失败",
+            )
+        except Exception:
+            try:
+                self._run_remote(
+                    ["python3", "-c", REMOTE_DELETE_FILE_SCRIPT, remote_tmp],
+                    f"{error_prefix}临时文件清理失败",
+                )
+            except Exception:
+                pass
+            raise
+
     def probe_tcp_endpoint(self, host, port, timeout_seconds):
         result = {"ok": False, "error": "", "management_error": False, "method": "tcp"}
         if self.mode == "ssh":
@@ -771,25 +799,12 @@ class DataPlaneController:
             if not source.is_file():
                 raise RuntimeError(f"{self.config.label} source config not found: {source}")
             content = source.read_text(encoding="utf-8")
-            remote_tmp = build_temp_target_path(self.config.config_path)
-            try:
-                self._run_remote(
-                    ["python3", "-c", REMOTE_WRITE_FILE_SCRIPT, remote_tmp],
-                    f"{self.config.label} 配置上传失败",
-                    input_text=content,
-                )
-                if validate_config:
-                    self.test_config(config_path=remote_tmp)
-                replaced = self._run_remote(
-                    ["python3", "-c", REMOTE_REPLACE_FILE_SCRIPT, remote_tmp, self.config.config_path],
-                    f"{self.config.label} 配置替换失败",
-                )
-            except Exception:
-                self._run_remote(
-                    ["python3", "-c", REMOTE_DELETE_FILE_SCRIPT, remote_tmp],
-                    f"{self.config.label} 临时配置清理失败",
-                )
-                raise
+            replaced = self._sync_text_file_to_remote(
+                content,
+                self.config.config_path,
+                f"{self.config.label} 配置",
+                validate_config=validate_config,
+            )
             config_changed = True
             try:
                 replace_result = json.loads(replaced.stdout or "{}")
@@ -805,10 +820,10 @@ class DataPlaneController:
             if not source.is_file():
                 raise RuntimeError(f"{self.config.label} panel ports file not found: {source}")
             content = source.read_text(encoding="utf-8")
-            self._run_remote(
-                ["python3", "-c", REMOTE_WRITE_FILE_SCRIPT, self.config.panel_ports_path],
-                f"{self.config.label} 面板端口文件上传失败",
-                input_text=content,
+            self._sync_text_file_to_remote(
+                content,
+                self.config.panel_ports_path,
+                f"{self.config.label} 面板端口文件",
             )
             uploaded.append(self.config.panel_ports_path)
 
@@ -819,10 +834,10 @@ class DataPlaneController:
             source = self.config.source_dynamic_routing_path
             if source.is_file():
                 content = source.read_text(encoding="utf-8")
-                self._run_remote(
-                    ["python3", "-c", REMOTE_WRITE_FILE_SCRIPT, self.config.dynamic_routing_path],
-                    f"{self.config.label} 动态路由上传失败",
-                    input_text=content,
+                self._sync_text_file_to_remote(
+                    content,
+                    self.config.dynamic_routing_path,
+                    f"{self.config.label} 动态路由",
                 )
             else:
                 self._run_remote(
@@ -857,7 +872,7 @@ class DataPlaneController:
             return False
 
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.write_text(str(payload.get("data", "")), encoding="utf-8")
+        write_text_atomic(local_path, str(payload.get("data", "")))
         return True
 
     def sync_dynamic_routing_from_remote(self):

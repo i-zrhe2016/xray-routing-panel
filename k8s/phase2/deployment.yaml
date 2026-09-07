@@ -206,7 +206,9 @@ spec:
               mountPath: /var/log/xray
               subPath: logs
         - name: xray-reloader
-          image: busybox:1.36
+          # Reuse the panel image so the watcher has both the Xray binary for
+          # validation and procps' pidof in the shared process namespace.
+          image: ghcr.io/your-org/xray-routing-panel:latest
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -216,10 +218,15 @@ spec:
               value: /etc/xray/config.json
             - name: XRAY_POLL_INTERVAL_SECONDS
               value: "2"
+            - name: XRAY_VALIDATE_BIN
+              value: /usr/local/bin/xray
           volumeMounts:
             - name: shared-storage
               mountPath: /etc/xray
               subPath: runtime
+            - name: shared-storage
+              mountPath: /var/log/xray
+              subPath: logs
             - name: xray-reloader-scripts
               mountPath: /scripts
               readOnly: true

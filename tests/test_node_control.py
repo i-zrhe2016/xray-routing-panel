@@ -17,6 +17,7 @@ from app.xray.node_control import (
     DataPlaneController,
     build_temp_target_path,
 )
+from app.xray.operation_lock import exclusive_file_lock
 
 
 def load_state_module(temp_root):
@@ -292,6 +293,39 @@ class NodeControlTest(unittest.TestCase):
         self.assertEqual(panel_ports_path.read_text(encoding="utf-8"), previous_panel_ports)
         self.assertEqual(config_path.read_text(encoding="utf-8"), previous_config)
         self.assertEqual(backup_config_path.read_text(encoding="utf-8"), previous_backup_config)
+
+    def test_external_reloader_commits_without_direct_restart_and_keeps_pending_marker(self):
+        os.environ["DATAPLANE_EXTERNAL_RELOADER_ENABLED"] = "1"
+        os.environ["CONTROL_PLANE_BACKUP_XRAY_ENABLED"] = "0"
+        state_module = load_state_module(self.root)
+        state = state_module.PanelState()
+        state.init_db()
+        state.render_xray_config = lambda: None
+        state.xray_config_test = lambda: None
+        state.restart_data_plane = mock.Mock(return_value=True)
+        pending = self.root / "xray" / "runtime" / "config.json.pending-apply"
+
+        with state.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state.persist_and_reload(conn, reload_xray=True)
+
+        self.assertFalse(state.restart_data_plane.called)
+        self.assertTrue(pending.exists())
+
+        # A maintenance write that deliberately skips reload must not erase a
+        # marker left for the external watcher.
+        with state.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state.persist_and_reload(conn, reload_xray=False)
+        self.assertTrue(pending.exists())
+
+    def test_maintenance_cleanup_skips_when_manager_holds_apply_lock(self):
+        state = load_state_module(self.root).PanelState()
+        state.init_db()
+        lock_path = state._ai_manager_apply_lock_path()
+
+        with exclusive_file_lock(lock_path):
+            self.assertEqual(state.disable_auto_stopped_ports(), 0)
 
     def test_forced_fallback_uses_manager_and_restores_mode_on_failure(self):
         os.environ["AI_ROUTING_ENABLED"] = "1"
@@ -569,7 +603,9 @@ class NodeControlTest(unittest.TestCase):
 
         self.assertEqual(uploaded, ["/etc/xray/config.json", "/etc/xray/dynamic-routing.json"])
         self.assertEqual(remote_calls[-1][0][-1], "/etc/xray/dynamic-routing.json")
-        self.assertEqual(remote_calls[-1][1], source_dynamic.read_text(encoding="utf-8"))
+        self.assertIsNone(remote_calls[-1][1])
+        self.assertRegex(remote_calls[-2][0][-1], r"^/etc/xray/dynamic-routing\.codex-tmp-[0-9a-f]{32}\.json$")
+        self.assertEqual(remote_calls[-2][1], source_dynamic.read_text(encoding="utf-8"))
 
     def test_remote_generated_sync_deletes_missing_dynamic_routing_fragment(self):
         source_config = self.root / "config.json"
