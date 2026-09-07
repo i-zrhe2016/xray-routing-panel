@@ -1,0 +1,471 @@
+{
+  "ai_domain_analysis": {
+    "classification_counts": {
+      "ai": 0,
+      "not_ai": 0,
+      "unknown": 0
+    },
+    "classification_hits": {
+      "ai": 0,
+      "not_ai": 0,
+      "unknown": 0
+    },
+    "codex": {
+      "ai_count": 0,
+      "classified_count": 0,
+      "domains": [],
+      "error_class": "",
+      "not_ai_count": 0,
+      "pending_domains": [],
+      "status": "unknown"
+    },
+    "domain_count": 0,
+    "domains": [],
+    "new_domain_count": 0,
+    "new_domain_hits": 0,
+    "new_domains": [],
+    "observed_hits": 0,
+    "source_counts": {
+      "builtin": 0,
+      "codex": 0,
+      "openai": 0,
+      "other": 0,
+      "unknown": 0
+    },
+    "sources": [
+      {
+        "configured": true,
+        "error_class": "",
+        "files": 0,
+        "invalid_files": 0,
+        "records": 0,
+        "source": "ai_routing_history",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "files": 0,
+        "invalid_files": 0,
+        "records": 222,
+        "source": "panel_db_ai_domains",
+        "success": true
+      }
+    ],
+    "status": "empty",
+    "traffic_direction_counts": {
+      "ai_proxy": 0,
+      "direct": 0,
+      "mixed": 0,
+      "unknown": 0
+    },
+    "window_end": "2026-09-07T16:00:00.000000Z",
+    "window_start": "2026-09-06T16:00:00.000000Z"
+  },
+  "collection_health": {
+    "gaps": [
+      {
+        "error_class": "prometheus_scrape_gap",
+        "node_role": "ai_data_plane",
+        "source": "prometheus:target_scrape"
+      }
+    ],
+    "node_coverage": {
+      "ai_data_plane": 0.994097,
+      "normal_data_plane": 0.994097
+    },
+    "overall_coverage_ratio": 0.994097,
+    "sources": [
+      {
+        "configured": true,
+        "error_class": "",
+        "files": 0,
+        "invalid_files": 0,
+        "source": "ai_routing_history",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 12,
+        "source": "prometheus:up",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 1,
+        "source": "prometheus:xray_panel_data_plane_running",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 1,
+        "source": "prometheus:xray_panel_ai_node_running",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 8,
+        "source": "prometheus:xray_panel_port_reachable",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 8,
+        "source": "prometheus:xray_panel_port_probe_timestamp_seconds",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 16,
+        "source": "prometheus:xray_panel_port_traffic_bytes_total",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 8,
+        "source": "prometheus:xray_panel_port_connections_total",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 1,
+        "source": "prometheus:xray_panel_dns_failover_target_info",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 1,
+        "source": "prometheus:xray_panel_dns_failover_last_probe_healthy",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 1,
+        "source": "prometheus:xray_panel_dns_failover_consecutive_failures",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 40,
+        "source": "prometheus:node_cpu_seconds_total",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 4,
+        "source": "prometheus:node_memory_MemAvailable_bytes",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 4,
+        "source": "prometheus:node_memory_MemTotal_bytes",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 28,
+        "source": "prometheus:node_filesystem_avail_bytes",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 28,
+        "source": "prometheus:node_filesystem_size_bytes",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 47,
+        "source": "prometheus:node_network_receive_bytes_total",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 47,
+        "source": "prometheus:node_network_transmit_bytes_total",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 50,
+        "source": "prometheus:container_cpu_usage_seconds_total",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 50,
+        "source": "prometheus:container_memory_working_set_bytes",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 50,
+        "source": "prometheus:container_spec_memory_limit_bytes",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "series": 50,
+        "source": "prometheus:container_last_seen",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "files": 0,
+        "invalid_files": 0,
+        "records": 0,
+        "source": "ai_routing_history",
+        "success": true
+      },
+      {
+        "configured": true,
+        "error_class": "",
+        "files": 0,
+        "invalid_files": 0,
+        "records": 222,
+        "source": "panel_db_ai_domains",
+        "success": true
+      }
+    ]
+  },
+  "evidence": [
+    {
+      "attributes": {
+        "duration_seconds": 1050,
+        "ended_at": "2026-09-06T16:17:30.000000Z",
+        "samples": 35,
+        "started_at": "2026-09-06T16:00:00.000000Z"
+      },
+      "evidence_id": "ev-6f505c00626200fa193c5d89",
+      "evidence_type": "service_state",
+      "node_role": "ai_data_plane",
+      "observed_at": "2026-09-06T16:00:00.000000Z",
+      "source": "prometheus:xray_panel_ai_node_running",
+      "source_quality": "complete",
+      "summary": "Prometheus 节点运行指标连续显示停止"
+    }
+  ],
+  "generated_at": "2026-09-08T00:10:34+08:00",
+  "generation_health": {
+    "atomic_write": "success",
+    "codex": "success",
+    "codex_attempts": 1,
+    "codex_error_class": "",
+    "codex_input": {
+      "byte_cap": 65536,
+      "evidence_available": 1,
+      "evidence_selected": 1,
+      "evidence_truncated": false,
+      "input_bytes": 6497,
+      "prompt_version": "2.0",
+      "schema_version": "1.0"
+    },
+    "codex_usage": {
+      "attempts": 1,
+      "estimated_price": {
+        "amount": null,
+        "currency": "USD",
+        "reason": "pricing_not_configured",
+        "status": "unavailable"
+      },
+      "model": "",
+      "provider": "",
+      "status": "available",
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 0,
+        "input_tokens": 11314,
+        "output_tokens": 870,
+        "reasoning_output_tokens": 411,
+        "total_tokens": 12184
+      }
+    },
+    "json_schema": "valid",
+    "markdown": "success",
+    "rules": "success"
+  },
+  "generation_mode": "codex",
+  "incidents": [
+    {
+      "ended_at": "2026-09-06T16:17:30.000000Z",
+      "evidence_ids": [
+        "ev-6f505c00626200fa193c5d89"
+      ],
+      "facts": [
+        "面板 Prometheus 运行指标连续至少两个采样显示停止。"
+      ],
+      "incident_id": "inc-e47ee16242584eb4ab3b7986",
+      "kind": "service_down",
+      "missing_sources": [],
+      "node_role": "ai_data_plane",
+      "rule_ids": [
+        "OPS-F001"
+      ],
+      "started_at": "2026-09-06T16:00:00.000000Z",
+      "status": "fault"
+    }
+  ],
+  "model_analysis": {
+    "executive_summary": "2026-09-07 日报总体状态为故障。已确定的故障仅涉及 AI 数据平面：规则 OPS-F001 命中，运行指标从 2026-09-06T16:00:00.000000Z 至 2026-09-06T16:17:30.000000Z 连续显示停止，共 35 个采样、持续 1050 秒，超过规则规定的至少 2 个采样。普通数据平面状态为正常。现有证据只能确认服务停止现象，不能确定根因。",
+    "node_explanations": [
+      {
+        "evidence_ids": [
+          "ev-6f505c00626200fa193c5d89"
+        ],
+        "explanation": "事实：AI 数据平面状态为故障，命中规则 OPS-F001；Prometheus 节点运行指标连续 35 个采样显示停止，时间区间为 2026-09-06T16:00:00.000000Z 至 2026-09-06T16:17:30.000000Z，持续 1050 秒。该结果满足规则阈值“至少 2 个采样”。",
+        "node_role": "ai_data_plane"
+      }
+    ],
+    "probable_causes": [],
+    "recommended_actions": [
+      {
+        "action": "高优先级核查该时间区间内 AI 节点的 Xray 进程或容器状态、退出码、系统日志及编排事件，以确定停止原因，并确认服务当前是否稳定运行。",
+        "evidence_ids": [
+          "ev-6f505c00626200fa193c5d89"
+        ],
+        "node_role": "ai_data_plane",
+        "priority": "high"
+      }
+    ],
+    "uncertainties": [
+      {
+        "description": "现有证据只证明运行指标连续显示停止，没有提供进程退出原因、主机异常、配置变更或人为操作记录，因此无法确定根因，也无法仅凭该证据判断区间结束后采用了何种恢复方式。",
+        "evidence_ids": [
+          "ev-6f505c00626200fa193c5d89"
+        ],
+        "node_role": "ai_data_plane"
+      }
+    ]
+  },
+  "model_output_schema_version": "1.0",
+  "nodes": [
+    {
+      "matched_rules": [],
+      "node_role": "normal_data_plane",
+      "resources": {
+        "threshold_breaches": []
+      },
+      "service": {
+        "coverage_ratio": 0.994097,
+        "downtime_intervals": [],
+        "prometheus_coverage_ratio": 0.994097,
+        "restart_events": 0,
+        "target_coverage_ratio": 1.0
+      },
+      "status": "normal",
+      "telemetry": {
+        "coverage_ratio": 0.994097,
+        "missing_sources": [],
+        "recorded_gaps": 0
+      },
+      "traffic": {
+        "attribution": [],
+        "coverage_ratio": 1.0,
+        "demand_increases": 10745,
+        "network_coverage_ratio": 1.0,
+        "network_devices": [
+          "eth0"
+        ],
+        "network_received_bytes": 2520637,
+        "network_total_bytes": 37100393,
+        "network_transmitted_bytes": 34579756,
+        "status": "demand_observed"
+      }
+    },
+    {
+      "matched_rules": [
+        {
+          "duration_seconds": 1050,
+          "ended_at": "2026-09-06T16:17:30.000000Z",
+          "evidence_ids": [
+            "ev-6f505c00626200fa193c5d89"
+          ],
+          "rule_id": "OPS-F001",
+          "samples": 35,
+          "started_at": "2026-09-06T16:00:00.000000Z"
+        }
+      ],
+      "node_role": "ai_data_plane",
+      "resources": {
+        "threshold_breaches": []
+      },
+      "service": {
+        "coverage_ratio": 0.994097,
+        "downtime_intervals": [
+          {
+            "duration_seconds": 1050,
+            "ended_at": "2026-09-06T16:17:30.000000Z",
+            "samples": 35,
+            "started_at": "2026-09-06T16:00:00.000000Z"
+          }
+        ],
+        "prometheus_coverage_ratio": 0.994097,
+        "restart_events": 0,
+        "target_coverage_ratio": 1.0
+      },
+      "status": "fault",
+      "telemetry": {
+        "coverage_ratio": 0.994097,
+        "missing_sources": [
+          "prometheus:target_scrape"
+        ],
+        "recorded_gaps": 0
+      },
+      "traffic": {
+        "attribution": [],
+        "coverage_ratio": 0.977778,
+        "demand_increases": 11252,
+        "network_coverage_ratio": 0.977778,
+        "network_devices": [
+          "eth0",
+          "eth1"
+        ],
+        "network_received_bytes": 10556530346,
+        "network_total_bytes": 20813145612,
+        "network_transmitted_bytes": 10256615266,
+        "status": "demand_observed"
+      }
+    }
+  ],
+  "overall_status": "fault",
+  "prompt_version": "2.0",
+  "report_date": "2026-09-07",
+  "rule_parameters": {
+    "cpu_pressure_percent": 95.0,
+    "memory_available_pressure_ratio": 0.1,
+    "resource_duration_seconds": 900,
+    "root_disk_pressure_ratio": 0.9,
+    "scrape_step_seconds": 30,
+    "service_down_min_samples": 2,
+    "telemetry_min_coverage_ratio": 0.9,
+    "xray_attribution_top_n": 10
+  },
+  "rules_version": "2.0",
+  "schema_version": "1.1",
+  "timezone": "Asia/Shanghai",
+  "window_end": "2026-09-08T00:00:00+08:00",
+  "window_start": "2026-09-07T00:00:00+08:00"
+}
