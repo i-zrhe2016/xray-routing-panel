@@ -15,7 +15,7 @@
 | Grafana | 控制面监控主机 | 通过 `GRAFANA_LOKI_URL` 查询远端 Loki |
 | Tailscale | 四个主机端点 | 提供 Agent 到 Loki、Grafana 到 Loki 的 tailnet 网络边界 |
 
-首期只支持 Docker Compose 节点，不部署 Kubernetes DaemonSet。日志采集不进入用户代理流量路径，也不依赖控制面业务进程。控制面业务日志只写 stdout/stderr，不新增 SQLite 审计表；Loki 保持当前 7 天（168 小时）保留策略。
+首期只支持 Docker Compose 节点。日志采集不进入用户代理流量路径，也不依赖控制面业务进程。控制面业务日志只写 stdout/stderr，不新增 SQLite 审计表；Loki 保持当前 7 天（168 小时）保留策略。
 
 ## 当前生产部署
 

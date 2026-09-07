@@ -48,7 +48,7 @@ Docker Compose 的备份容器默认收集：
 
 - 当次生成的 `panel.db` 一致性快照
 - `/srv/xray-ops/ops.db` 的独立 SQLite 在线快照（存在时）
-- Compose、ops-reporting Compose、`.env`/`.env.ops-reporting`、Kubernetes 清单
+- Compose、ops-reporting Compose、`.env`/`.env.ops-reporting`
 - Xray `.env`、渲染运行配置、报告、备份脚本和 `data/uploads`
 
 项目目录和 `/srv/xray-ops` 均只读挂载到备份容器；缺失的可选文件会记录在 manifest 中，不阻断 `panel.db` 备份。启用 SSH 采集后，归档还会加入：
@@ -65,8 +65,6 @@ node-recovery-manifest.json
 ```
 
 普通数据面通过控制面内网 SSH `root@100.116.187.106:22` 管理，主配置是 `/root/xray-routing-panel/app/xray/runtime/config.json`；AI 备用运行在控制面本机 `redacted-ip-004`，配置 `config-ai-node.json` 随控制面运行时目录归档。远端采集结果记录在 `nodes/remote-node-collection.json`。完整 SSH 边界见[远端节点配置采集](remote-node-backup.md)。
-
-Kubernetes 变体默认关闭 SSH 采集。若要启用，需在备份 CronJob 的 ConfigMap/Secret 中显式设置内网目标、认证方式和路径，并按需挂载 known_hosts；不要把密码或私钥内容提交到仓库。Kubernetes 的具体边界见[K3s 部署](kubernetes.md)。
 
 ## 配置
 
@@ -89,7 +87,7 @@ Kubernetes 变体默认关闭 SSH 采集。若要启用，需在备份 CronJob �
 | `DB_BACKUP_AI_NODE_DEPLOY_ROOT` | `/root/xray-routing-panel` | 远端 AI 节点的部署根 |
 | `DB_BACKUP_RECOVERY_REQUIRED` | `0` | `1` 时不完整节点恢复包阻止后续上传；默认保留数据库备份并记录状态 |
 | `DB_BACKUP_RECOVERY_STATUS_PATH` | 归档目录下的 `node-recovery-status.json` | 最近一次节点恢复完整性报告 |
-| `DB_BACKUP_R2_ENABLED` | `1`（Compose） | 是否将加密灾备归档上传到 R2；Kubernetes 需显式设置并注入凭据 |
+| `DB_BACKUP_R2_ENABLED` | `1`（Compose） | 是否将加密灾备归档上传到 R2；直接执行脚本时需显式设置并注入凭据 |
 | `DB_BACKUP_R2_ENDPOINT` | 空 | Cloudflare R2 S3 endpoint |
 | `DB_BACKUP_R2_BUCKET` | 空 | R2 bucket 名称 |
 | `DB_BACKUP_R2_ACCESS_KEY_ID` | 空 | R2 S3 access key ID |
@@ -100,12 +98,12 @@ Kubernetes 变体默认关闭 SSH 采集。若要启用，需在备份 CronJob �
 示例：加入控制面项目文件和自定义密钥目录（目录必须以只读方式挂载到备份容器）：
 
 ```dotenv
-DB_BACKUP_EXTRA_PATHS=/app/xray/.env,/app/xray/runtime,/app/xray/reports,/data/uploads,/backup-input/docker-compose.yml,/backup-input/k8s
+DB_BACKUP_EXTRA_PATHS=/app/xray/.env,/app/xray/runtime,/app/xray/reports,/data/uploads,/backup-input/docker-compose.yml
 ```
 
 `DB_BACKUP_EXTRA_PATHS` 路径会被写入归档的 `config/` 前缀下，远端 SSH staging 则写入 `nodes/`，避免恢复时覆盖宿主机绝对路径。归档内的 `backup-manifest.json` 记录每个文件的来源、大小和 SHA-256；`remote-node-collection.json` 记录 SSH 目标和逐路径状态；`node-recovery-manifest.json` 再声明哪些文件足以快速恢复每类节点。
 
-`DB_BACKUP_EXTRA_PATHS` 可以包含业务敏感配置，但不要把 R2 密钥、SSH 私钥或其他不需要迁移的凭据目录加入列表；数据库快照和灾备归档在本地生成时仍是明文，文件权限统一为 `0600`，备份目录也必须限制为备份服务可读。R2 凭据只通过部署环境、Docker Secret 或 Kubernetes Secret 注入，灾备加密密码必须与 R2 Secret Access Key 分离保存。任何出现在聊天、日志或 shell 历史中的 token 都应立即撤销。
+`DB_BACKUP_EXTRA_PATHS` 可以包含业务敏感配置，但不要把 R2 密钥、SSH 私钥或其他不需要迁移的凭据目录加入列表；数据库快照和灾备归档在本地生成时仍是明文，文件权限统一为 `0600`，备份目录也必须限制为备份服务可读。R2 凭据只通过部署环境、Docker Secret 或外部 Secret 管理注入，灾备加密密码必须与 R2 Secret Access Key 分离保存。任何出现在聊天、日志或 shell 历史中的 token 都应立即撤销。
 
 ## R2 灾备保留策略
 

@@ -520,7 +520,7 @@ class CoreService:
                 backup_restart_attempted = True
                 if not self._panel.restart_backup_xray():
                     raise RuntimeError("控制面备用 Xray 重载失败，端口变更未提交。")
-            # In external-reloader mode the sidecar validates, restarts, and
+            # In external-reloader mode the watcher validates, restarts, and
             # removes the marker after the new process is observable. In direct
             # mode the panel owns the restart itself.
             if reload_xray and not DATAPLANE_EXTERNAL_RELOADER_ENABLED:

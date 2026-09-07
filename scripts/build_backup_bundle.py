@@ -158,7 +158,7 @@ def create_backup_bundle(backup_path, extra_paths, bundle_dir, prefix, named_pat
 
     Missing optional paths are recorded as skipped rather than making the
     database backup fail.  This is important for the same image to work in
-    local, Docker and Kubernetes layouts where some config files are absent.
+    local and Docker layouts where some config files are absent.
     """
 
     database = Path(backup_path).resolve()

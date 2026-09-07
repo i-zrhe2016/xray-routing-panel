@@ -32,10 +32,10 @@
 | `DATAPLANE_PANEL_PORTS_PATH` | 远端 `panel-ports.json` 路径 |
 | `DATAPLANE_ACCESS_LOG_PATH` | 远端 `access.log` 路径；AI 管理器每小时通过 SSH 增量读取；留空且 `DATAPLANE_CONFIG_PATH` 使用 `.../runtime/config.json` 时，自动推导同级 `.../logs/access.log` |
 | `DATAPLANE_RESTART_COMMAND` | 远端数据面重启命令 |
-| `DATAPLANE_EXTERNAL_RELOADER_ENABLED` | 数据面由外部 watcher（例如 Kubernetes `xray-reloader` sidecar）重载时设为 `1`；默认 `0` |
+| `DATAPLANE_EXTERNAL_RELOADER_ENABLED` | 数据面由外部 watcher 重载时设为 `1`；默认 `0` |
 | `AI_DOMAIN_MANAGER_LOCK_PATH` | AI 管理器跨进程锁路径；默认与 `XRAY_CONFIG_OUT` 同目录的 `.ai-domain-manager.lock` |
 | `AI_DOMAIN_MANAGER_MANUAL_LOCK_PATH` | 常驻任务与面板手动切换共享的互斥锁路径；默认与 `XRAY_CONFIG_OUT` 同目录的 `.ai-domain-manager-manual.lock` |
-| `AI_DOMAIN_MANAGER_EXECUTION_MODE` | 面板触发管理器的方式：`docker`（默认）或同容器/Pod 内 `local` |
+| `AI_DOMAIN_MANAGER_EXECUTION_MODE` | 面板触发管理器的方式：`docker`（默认）或同一运行环境内 `local` |
 | `DATAPLANE_PROBE_HOST` | TCP 探针连接目标；远端模式下应指向远端入口 IP 或域名 |
 | `DB_BACKUP_RECOVERY_REQUIRED` | 节点恢复材料不完整时是否阻止灾备归档继续上传；默认 `0`，完整性状态仍会写入报告 |
 | `DB_BACKUP_RECOVERY_STATUS_PATH` | 最近一次节点恢复完整性报告路径 |
@@ -135,7 +135,7 @@ Fluent Bit 日志采集使用 `monitoring/fluent-bit/.env`，远端 Loki 使用 
 
 | 变量 | 说明 |
 | --- | --- |
-| `DB_BACKUP_R2_ENABLED` | 是否在每日本地备份成功后上传；Compose 备份服务默认 `1`，Kubernetes/直接执行脚本需显式启用 |
+| `DB_BACKUP_R2_ENABLED` | 是否在每日本地备份成功后上传；Compose 备份服务默认 `1`，直接执行脚本需显式启用 |
 | `DB_BACKUP_R2_ENDPOINT` | Cloudflare R2 S3 endpoint，必须使用 HTTPS |
 | `DB_BACKUP_R2_BUCKET` | R2 bucket 名称 |
 | `DB_BACKUP_R2_ACCESS_KEY_ID` / `DB_BACKUP_R2_SECRET_ACCESS_KEY` | R2 S3 凭据，只通过部署环境或 Secret 注入 |
