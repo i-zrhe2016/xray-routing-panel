@@ -335,7 +335,8 @@ docker compose run --rm xray-routing-panel-db-backup \
 - [../app/dns_failover.py](../app/dns_failover.py): Cloudflare API 客户端与切换策略
 - [../app/xray/render_config.py](../app/xray/render_config.py): 渲染 Xray 服务端和客户端产物（普通数据面、AI 节点、控制面备用）
 - [../app/xray/node_control.py](../app/xray/node_control.py): `DataPlaneController` / `ManagedNodeController`——受管节点控制器（SSH 推送、重启、探测），统一用于普通数据面和 AI 节点
-- [../app/xray/ai_domain_manager.py](../app/xray/ai_domain_manager.py): AI 域名分类、动态路由、报表
+- [../app/xray/ai_routing/runner.py](../app/xray/ai_routing/runner.py): AI 路由定时任务和 CLI 入口
+- [../app/xray/ai_routing/manager.py](../app/xray/ai_routing/manager.py): AI 路由单轮编排
 
 前端与运维：
 

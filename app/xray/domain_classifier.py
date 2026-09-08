@@ -1,15 +1,15 @@
 """Domain classification helpers exposed as a stable app.xray submodule."""
 
-from app.xray.ai_domain_manager import FORCED_AI_ROUTE_DOMAIN_SUFFIXES
-from app.xray.ai_domain_manager import KNOWN_AI_DOMAIN_SUFFIXES
-from app.xray.ai_domain_manager import classify_domains_via_codex
-from app.xray.ai_domain_manager import classify_domains_via_openai
-from app.xray.ai_domain_manager import classify_pending_domains
-from app.xray.ai_domain_manager import load_decisions
-from app.xray.ai_domain_manager import matches_forced_ai_route_domain
-from app.xray.ai_domain_manager import matches_known_ai_domain
-from app.xray.ai_domain_manager import normalize_classification
-from app.xray.ai_domain_manager import sync_builtin_domain_decisions
+from app.xray.ai_routing.classifier import FORCED_AI_ROUTE_DOMAIN_SUFFIXES
+from app.xray.ai_routing.classifier import KNOWN_AI_DOMAIN_SUFFIXES
+from app.xray.ai_routing.classifier import classify_domains_via_codex
+from app.xray.ai_routing.classifier import classify_domains_via_openai
+from app.xray.ai_routing.classifier import classify_pending_domains
+from app.xray.ai_routing.classifier import load_decisions
+from app.xray.ai_routing.classifier import matches_forced_ai_route_domain
+from app.xray.ai_routing.classifier import matches_known_ai_domain
+from app.xray.ai_routing.classifier import normalize_classification
+from app.xray.ai_routing.classifier import sync_builtin_domain_decisions
 
 __all__ = [
     "FORCED_AI_ROUTE_DOMAIN_SUFFIXES",

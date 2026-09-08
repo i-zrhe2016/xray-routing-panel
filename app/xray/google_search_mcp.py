@@ -10,15 +10,15 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from app.xray.ai_domain_manager import DOMAIN_RE
-from app.xray.ai_domain_manager import extract_chat_completions_text
-from app.xray.ai_domain_manager import env_int
-from app.xray.ai_domain_manager import format_timestamp
-from app.xray.ai_domain_manager import load_decisions
-from app.xray.ai_domain_manager import load_json
-from app.xray.ai_domain_manager import normalize_classification
-from app.xray.ai_domain_manager import save_json
-from app.xray.ai_domain_manager import utc_now
+from app.xray.ai_routing.classifier import extract_chat_completions_text
+from app.xray.ai_routing.classifier import load_decisions
+from app.xray.ai_routing.classifier import normalize_classification
+from app.xray.ai_routing.common import DOMAIN_RE
+from app.xray.ai_routing.common import env_int
+from app.xray.ai_routing.common import format_timestamp
+from app.xray.ai_routing.common import load_json
+from app.xray.ai_routing.common import save_json
+from app.xray.ai_routing.common import utc_now
 from app.xray.config import HOURLY_REPORTS_DIR
 from app.xray.config import RUNTIME_DIR
 from app.xray.envfile import load_env_file as load_env_file_values

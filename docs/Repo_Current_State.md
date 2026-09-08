@@ -1,10 +1,10 @@
 # Repository Current State
 
-Last verified: 2026-09-07 @ working tree
+Last verified: 2026-09-08 @ working tree
 
 ## Current Focus
 
-- AI 路由主要 review findings 已修复并部署到控制面 Docker Compose；部署形态已收敛为 Compose。
+- AI Routing 第一阶段 Python 拆分、本地验证和最终代码审查已完成，已提交到本地 feature branch，等待发布确认。
 
 ## Implemented
 
@@ -14,6 +14,7 @@ Last verified: 2026-09-07 @ working tree
 - Compose 注入管理器执行模式、共享数据库路径和外部 reloader 开关。
 - 已移除未使用的编排清单和专属部署文档；备份 allowlist 与文档导航仅保留 Compose 入口。
 - 强制回退报告不再假设上游 host/port；未管理数据面报告为 `unmanaged`，不执行不存在的重启。
+- AI 路由实现已拆分到 `app/xray/ai_routing/`：`runner.py` 负责 CLI/定时任务，`manager.py` 负责编排，其余模块分别负责观测、分类、候选、选择、SQLite 仓储和产物；旧 `app/xray/ai_domain_manager.py` 保留为兼容 facade，并完整保留历史 helper 导出。
 
 ## In Progress
 
@@ -21,9 +22,9 @@ Last verified: 2026-09-07 @ working tree
 
 ## Known Issues / Failing Checks
 
-- 受影响定向回归通过：管理器、节点控制、商业履约共 68 项；本地 Xray、节点恢复、备用周期和渲染共 29 项。`py_compile` 和 Compose 配置检查通过。
-- 全量 `unittest discover` 在当前容器不干净：6 个 pytest 测试因镜像未安装 pytest 无法导入，另有 Google/本地 socket/管理员凭据相关环境失败；需在完整 CI 凭据与依赖环境复核。
-- Open Code Review CLI preview 可生成变更清单，但实际 review 因未配置 `OCR_LLM_URL/OCR_LLM_TOKEN/OCR_LLM_MODEL`（或等效 Anthropic 配置）未执行。
+- 全量 `pytest -q` 通过：241 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
+- 新增 `app/xray/ai_routing/` 已通过 Ruff、Black、`py_compile`、CLI `--help`、旧入口兼容 CLI、PlantUML 本地渲染和 Compose 配置检查。
+- `codex review --uncommitted` 已完成；review 发现的旧入口 helper 导出问题已修复并复跑聚焦/全量测试。review sandbox 自带的全量测试受 socket 权限限制，但当前工作区直接执行结果为上述 `241 passed、1 skipped`。
 - 当前控制面的 `xray-routing-panel` 已重建并健康运行，`/healthz` 返回 `ok=true`；本次未启动 Compose 的 Xray profile。
 
 ## Constraints
@@ -35,8 +36,9 @@ Last verified: 2026-09-07 @ working tree
 
 - Flask 控制面通过 `app/state/` 服务管理 SQLite，`app/xray/node_control.py` 管理本地、Docker 或 SSH 数据面。
 - AI 管理器与面板通过运行时目录中的应用锁和待应用标记协作；启用外部 reloader 时由 watcher 负责 Xray 进程重载。
+- AI Routing 包的模块边界和数据流见 [AI 路由](ai-routing.md) 与 [小时分析流程图](diagrams/ai-hourly-analysis.svg)。
 - 报告由管理器写入共享 `app/xray/reports`，面板从同一卷读取；详细流程见 [AI 路由](ai-routing.md)。
 
 ## Next
 
-- 如启用外部 reloader，在目标节点执行滚动重载验收；在完整 CI 依赖与凭据环境复核全量测试。
+- 当前实现和验证已完成；如需发布，下一步是推送 feature branch 并按仓库流程创建 PR。当前未自动推送。

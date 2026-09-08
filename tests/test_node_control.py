@@ -362,7 +362,7 @@ class NodeControlTest(unittest.TestCase):
             [
                 sys.executable,
                 "-m",
-                "app.xray.ai_domain_manager",
+                "app.xray.ai_routing.runner",
                 "--once",
                 "--manual-mode",
                 "forced_fallback",

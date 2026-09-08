@@ -266,7 +266,7 @@ docker compose --profile backup-xray logs -f xray-reality-backup
 #### 场景② AI 候选故障
 
 - DNS 指向不变（仍为 primary / 数据面 IP）
-- `ai_domain_manager` 的 `select_ai_target()`（`ai_domain_manager.py:1280`）探测主、备候选
+- `app/xray/ai_routing/selector.py` 的 `select_ai_target()` 探测主、备候选
 - `auto` 模式下选择另一可达候选并更新 `dynamic-routing.json`
 - 如果两个候选都不可达，才删除 `dynamic-routing.json`，重新渲染数据面配置并回退到 freedom 直出
 - 候选恢复后，下一轮探测重新生成 `dynamic-routing.json`，恢复转发
