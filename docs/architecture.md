@@ -34,7 +34,7 @@
 ### 控制面
 
 - 入口代码：`app/panel.py`（进程入口）→ `app/web/`（`create_app` 工厂 + 按域视图模块）、`app/state/`（`PanelState` facade 组合域 service）
-- `PanelState` 持有两个受管节点控制器：`data_plane`（普通数据面）和 `ai_node`（AI 节点），均复用 `DataPlaneController` / `ManagedNodeController`（`app/xray/node_control.py`）
+- `PanelState` 持有两个受管节点控制器：`data_plane`（普通数据面）和 `ai_node`（AI 节点），均复用 `NodeController`（`app/xray/node/`）；旧的 `app/xray/node_control.py` 仅作为兼容 facade
 - Flask 同时托管：管理后台 SPA（`/`）、订阅者门户 SPA（`/portal`）、公共/认证页（`/plans`、`/customer/*`）、租户订阅直达（`/tenant/<token>`）和探针/AI 仪表盘；前端发布资源位于 `app/static/{admin,portal,landing}`，Admin 源码与 Vite 配置位于 `frontend/`
 - 保存端口、租户、流量、AI 聚合，以及商业化数据（客户、套餐、订单、服务订阅、支付凭证）到 `data/panel.db`
 - 保存 DNS 故障切换状态和事件历史到 `data/panel.db`
@@ -90,7 +90,11 @@
 
 ## 节点模式判定
 
-`app/xray/node_control.py` 中的 `DataPlaneController`（别名 `ManagedNodeController`）按以下优先级决定模式，对普通数据面和 AI 节点均适用：
+`app/xray/node/controller.py` 中的 `NodeController` 按以下优先级选择 backend，对普通数据面和 AI 节点均适用：
+
+- `backend.py` 定义 `DataPlaneConfig` 与 `NodeBackend` 契约；`ssh.py`、`docker.py`、`local.py` 分别封装 SSH、Docker、本地进程操作
+- `probes.py` 负责 TCP、REALITY、API socket 和公网 IP 探测；`files.py` 负责远端文件同步、日志增量和数据库快照
+- `app/xray/node_control.py` 保留 `DataPlaneController` / `ManagedNodeController` 旧导入路径，不再承载实现
 
 1. `ssh`
    - 条件：设置了 `DATAPLANE_SSH_TARGET`（普通数据面）或 `AI_NODE_SSH_TARGET`（AI 节点）
