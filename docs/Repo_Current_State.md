@@ -1,10 +1,10 @@
 # Repository Current State
 
-Last verified: 2026-09-08 @ 89e83fe
+Last verified: 2026-09-08 @ working tree
 
 ## Current Focus
 
-- AI Routing 第一阶段 Python 拆分与 NodeController 第二阶段均已合并到 `main`；本机默认 Docker Compose 栈仍运行上一版已验证部署。
+- AI Routing 第一阶段 Python 拆分与 NodeController 第二阶段均已合并到 `main`；本机默认控制面与数据库备份服务已按 `6c8eef3` 重建并通过健康检查，Xray profile 未启用。
 
 ## Implemented
 
@@ -16,7 +16,7 @@ Last verified: 2026-09-08 @ 89e83fe
 - 强制回退报告不再假设上游 host/port；未管理数据面报告为 `unmanaged`，不执行不存在的重启。
 - AI 路由实现已拆分到 `app/xray/ai_routing/`：`runner.py` 负责 CLI/定时任务，`manager.py` 负责编排，其余模块分别负责观测、分类、候选、选择、SQLite 仓储和产物；旧 `app/xray/ai_domain_manager.py` 保留为兼容 facade，并完整保留历史 helper 导出。
 - NodeController 已拆分到 `app/xray/node/` 并合并到 `main`：`controller.py` 只负责 backend 选择和编排，`backend.py` 定义节点契约，`ssh.py`、`docker.py`、`local.py` 分别实现传输/进程操作，`probes.py` 与 `files.py` 分离探测和文件同步；旧 `app/xray/node_control.py` 保留为兼容 facade。
-- 本机默认控制面和数据库备份服务已按 `62e52a8` 重建并启动；面板 `/healthz` 返回 `ok=true`，控制面容器为 `healthy`。Xray profile 当前未启用。
+- 本机默认控制面和数据库备份服务已按 `6c8eef3` 重建并启动；面板 `/healthz` 连续三次返回 `ok=true`，控制面容器为 `healthy`，备份容器的 cron 正常运行。Xray profile 当前未启用。
 
 ## In Progress
 
@@ -43,4 +43,4 @@ Last verified: 2026-09-08 @ 89e83fe
 
 ## Next
 
-- 按需重建本机 Compose 栈。
+- 如需启用本机 Xray profile，再按完整栈验收流程执行；当前未启用。
