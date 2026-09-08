@@ -1,10 +1,10 @@
 # Repository Current State
 
-Last verified: 2026-09-08 @ working tree
+Last verified: 2026-09-08 @ 0b12016
 
 ## Current Focus
 
-- AI Routing 第一阶段 Python 拆分已合并到 `main`，NodeController 第二阶段已完成代码拆分，待提交发布；本机默认 Docker Compose 栈仍运行上一版已验证部署。
+- AI Routing 第一阶段 Python 拆分已合并到 `main`，NodeController 第二阶段已完成代码拆分并已推送 feature branch；本机默认 Docker Compose 栈仍运行上一版已验证部署。
 
 ## Implemented
 
@@ -43,4 +43,4 @@ Last verified: 2026-09-08 @ working tree
 
 ## Next
 
-- 提交并发布 NodeController 第二阶段；发布后按需重建本机 Compose 栈。
+- 合并 NodeController 第二阶段后，按需重建本机 Compose 栈。
