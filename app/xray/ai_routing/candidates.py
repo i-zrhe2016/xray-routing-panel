@@ -6,7 +6,7 @@ import re
 import socket
 from urllib.parse import parse_qsl, unquote, urlparse
 
-from app.xray.node_control import reality_handshake_probe
+from app.xray.node.probes import reality_handshake_probe
 
 from .common import format_timestamp, utc_now
 

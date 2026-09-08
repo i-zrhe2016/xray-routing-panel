@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from app.xray.node_control import DataPlaneConfig, DataPlaneController
+from app.xray.node import DataPlaneConfig, NodeController
 from app.xray.operation_lock import LockBusyError, exclusive_file_lock
 
 from .artifact import (
@@ -57,7 +57,7 @@ def build_data_plane_controller(args):
     if data_plane_config_path:
         panel_ports_path = str(Path(data_plane_config_path).with_name("panel-ports.json"))
     source_panel_ports_path = Path(args.config_out).with_name("panel-ports.json")
-    return DataPlaneController(
+    return NodeController(
         DataPlaneConfig(
             role="data_plane",
             label="数据面",

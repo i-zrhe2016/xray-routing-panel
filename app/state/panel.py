@@ -1,6 +1,5 @@
 import threading
 
-
 from ..config import (
     AI_NODE_API_SERVER,
     AI_NODE_API_SERVERS,
@@ -70,8 +69,7 @@ from ..config import (
     XRAY_PANEL_PORTS_PATH,
 )
 from ..dns_failover import DnsFailoverConfig, DnsFailoverManager
-from ..xray.node_control import DataPlaneConfig, DataPlaneController
-
+from ..xray.node import DataPlaneConfig, NodeController
 from .ai_routing import AiRoutingService
 from .base import CoreService
 from .commerce import CommerceService
@@ -131,7 +129,7 @@ class PanelState:
         PAYMENT_PROOFS_DIR.mkdir(parents=True, exist_ok=True)
         XRAY_PANEL_PORTS_PATH.parent.mkdir(parents=True, exist_ok=True)
         XRAY_ACCESS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        self.data_plane = DataPlaneController(
+        self.data_plane = NodeController(
             DataPlaneConfig(
                 role="data_plane",
                 label="数据面",
@@ -213,7 +211,7 @@ class PanelState:
             for index in range(node_count):
                 node_id = node_ids[index] if node_count > 1 or AI_NODE_LIST_CONFIGURED else "ai_node"
                 label = labels[index] if node_count > 1 or AI_NODE_LIST_CONFIGURED else "AI 节点"
-                self.ai_nodes[node_id] = DataPlaneController(
+                self.ai_nodes[node_id] = NodeController(
                     DataPlaneConfig(
                         role="ai_node",
                         label=label,

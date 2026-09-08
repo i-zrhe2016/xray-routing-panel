@@ -4,7 +4,7 @@ import socket
 from ..config import PROBE_TIMEOUT
 from ..helpers import utc_iso_now
 from ..subscriptions import parse_xray_client_profile
-from ..xray.node_control import reality_handshake_probe
+from ..xray.node.probes import reality_handshake_probe
 
 
 class DiagnosticsService:
