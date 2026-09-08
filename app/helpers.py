@@ -135,6 +135,13 @@ def localize_time(value):
     return datetime.fromisoformat(value).astimezone(LOCAL_TZ)
 
 
+def format_optional_display_time(value, default="暂无"):
+    localized = localize_time(value)
+    if localized is None:
+        return default
+    return localized.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def generate_subscription_token(length=12):
     alphabet = string.ascii_lowercase + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))

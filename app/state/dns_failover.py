@@ -1,7 +1,5 @@
-
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
 
 from ..config import (
     CONTROL_PLANE_BACKUP_XRAY_ENABLED,
@@ -16,10 +14,68 @@ from ..helpers import (
 from ..observability.logging import emit_business_event
 
 
-
 class DnsFailoverService:
-    def __init__(self, panel):
-        self._panel = panel
+    """DNS failover policy backed by explicit storage, node and DNS manager ports."""
+
+    def __init__(
+        self,
+        repository=None,
+        node_controller=None,
+        failover_manager=None,
+        backup_xray=None,
+        write_lock=None,
+        public_ip_resolver=None,
+    ):
+        self.repository = repository
+        self.node_controller = node_controller
+        self.failover_manager = failover_manager
+        self.backup_xray = backup_xray
+        self.write_lock = write_lock
+        self.public_ip_resolver = public_ip_resolver if public_ip_resolver is not None else resolve_public_ip
+
+    def _backup_xray_mode(self):
+        if self.backup_xray is None:
+            return "disabled"
+        return self.backup_xray.backup_xray_mode()
+
+    def ensure_dns_failover_schema(self, conn):
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS dns_failover_state (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                current_target TEXT NOT NULL DEFAULT 'primary',
+                current_record_content TEXT NOT NULL DEFAULT '',
+                current_record_ttl INTEGER,
+                current_record_proxied INTEGER,
+                last_probe_status TEXT NOT NULL DEFAULT 'unknown',
+                last_probe_checked_at TEXT,
+                last_probe_error TEXT NOT NULL DEFAULT '',
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                consecutive_successes INTEGER NOT NULL DEFAULT 0,
+                last_switch_at TEXT,
+                last_switch_reason TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS dns_failover_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                event_status TEXT NOT NULL,
+                target TEXT NOT NULL DEFAULT '',
+                record_content TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO dns_failover_state (singleton_id)
+            VALUES (1)
+            ON CONFLICT(singleton_id) DO NOTHING
+            """
+        )
+
     def parse_time_of_day_minutes(self, value):
         text = str(value or "").strip()
         if not text:
@@ -33,6 +89,7 @@ class DnsFailoverService:
         if hour < 0 or hour > 23 or minute < 0 or minute > 59:
             return None
         return (hour * 60) + minute
+
     def resolve_dns_failover_peak_timezone(self, raw):
         text = str(raw or "").strip()
         if not text:
@@ -51,6 +108,7 @@ class DnsFailoverService:
             return ZoneInfo(text), text
         except ZoneInfoNotFoundError as exc:
             raise ValidationError("DNS_FAILOVER_PEAK_TIMEZONE 无法识别。") from exc
+
     def peak_window_active(self, current_minutes, start_minutes, end_minutes):
         """Whether ``current_minutes`` falls inside the window, handling spans that cross midnight."""
         if start_minutes < end_minutes:
@@ -58,7 +116,7 @@ class DnsFailoverService:
         return current_minutes >= start_minutes or current_minutes < end_minutes
 
     def dns_failover_peak_window_status(self, now=None):
-        config = self._panel.dns_failover_manager.config
+        config = self.failover_manager.config
         status = {
             "enabled": bool(config.peak_enabled),
             "configured": False,
@@ -66,7 +124,7 @@ class DnsFailoverService:
             "target": "backup",
             "target_label": config.backup_label,
             "preferred_target": "primary",
-            "preferred_target_label": self._panel.dns_failover_manager.target_label("primary"),
+            "preferred_target_label": self.failover_manager.target_label("primary"),
             "next_preferred_target": "",
             "next_preferred_target_label": "",
             "start": str(config.peak_start or "").strip(),
@@ -81,8 +139,8 @@ class DnsFailoverService:
         if not status["enabled"]:
             return status
 
-        start_minutes = self._panel.parse_time_of_day_minutes(status["start"])
-        end_minutes = self._panel.parse_time_of_day_minutes(status["end"])
+        start_minutes = self.parse_time_of_day_minutes(status["start"])
+        end_minutes = self.parse_time_of_day_minutes(status["end"])
         if start_minutes is None or end_minutes is None:
             status["config_error"] = "缺少有效的 DNS_FAILOVER_PEAK_START / DNS_FAILOVER_PEAK_END。"
             return status
@@ -91,14 +149,14 @@ class DnsFailoverService:
             return status
 
         try:
-            tzinfo, tz_label = self._panel.resolve_dns_failover_peak_timezone(status["timezone"])
+            tzinfo, tz_label = self.resolve_dns_failover_peak_timezone(status["timezone"])
         except ValidationError as exc:
             status["config_error"] = str(exc)
             return status
 
         current = (now or datetime.now(timezone.utc)).astimezone(tzinfo)
         current_minutes = (current.hour * 60) + current.minute
-        active = self._panel.peak_window_active(current_minutes, start_minutes, end_minutes)
+        active = self.peak_window_active(current_minutes, start_minutes, end_minutes)
         preferred_target = "backup" if active else "primary"
 
         # The preference flips at the window's end boundary while active, at its start boundary otherwise.
@@ -113,9 +171,9 @@ class DnsFailoverService:
                 "configured": True,
                 "active": active,
                 "preferred_target": preferred_target,
-                "preferred_target_label": self._panel.dns_failover_manager.target_label(preferred_target),
+                "preferred_target_label": self.failover_manager.target_label(preferred_target),
                 "next_preferred_target": next_preferred_target,
-                "next_preferred_target_label": self._panel.dns_failover_manager.target_label(next_preferred_target),
+                "next_preferred_target_label": self.failover_manager.target_label(next_preferred_target),
                 "timezone_label": tz_label,
                 "current_time": current.strftime("%Y-%m-%d %H:%M:%S"),
                 "next_transition_at": next_transition.strftime("%Y-%m-%d %H:%M"),
@@ -123,6 +181,7 @@ class DnsFailoverService:
             }
         )
         return status
+
     def evaluate_dns_failover_transition(
         self,
         current_target,
@@ -137,29 +196,30 @@ class DnsFailoverService:
         alternate = "backup" if preferred == "primary" else "primary"
 
         if probe_ok:
-            if current_target == alternate and consecutive_successes >= self._panel.dns_failover_manager.config.recovery_threshold:
+            if current_target == alternate and consecutive_successes >= self.failover_manager.config.recovery_threshold:
                 return {
                     "target": preferred,
                     "reason": "peak_recovery" if preferred == "backup" else "auto_recovery",
                 }
             return None
-        if current_target == preferred and consecutive_failures >= self._panel.dns_failover_manager.config.failure_threshold:
+        if current_target == preferred and consecutive_failures >= self.failover_manager.config.failure_threshold:
             return {
                 "target": alternate,
                 "reason": "peak_failover" if preferred == "backup" else "auto_failover",
             }
         return None
+
     def dns_failover_status(self):
-        config = self._panel.dns_failover_manager.config
-        resolved_contents = self._panel.resolve_dns_failover_contents()
-        peak_window = self._panel.dns_failover_peak_window_status()
-        with self._panel.connect() as conn:
+        config = self.failover_manager.config
+        resolved_contents = self.resolve_dns_failover_contents()
+        peak_window = self.dns_failover_peak_window_status()
+        with self.repository.connect() as conn:
             row = conn.execute("SELECT * FROM dns_failover_state WHERE singleton_id = 1").fetchone()
         item = dict(row) if row is not None else {}
         current_target = item.get("current_target") or "primary"
         record_content = item.get("current_record_content") or ""
         if current_target not in {"primary", "backup"}:
-            inferred = self._panel.dns_failover_manager.current_target_from_content(
+            inferred = self.failover_manager.current_target_from_content(
                 record_content,
                 primary_content=resolved_contents["primary_content"],
                 backup_content=resolved_contents["backup_content"],
@@ -174,44 +234,49 @@ class DnsFailoverService:
                 and not resolved_contents["error"]
                 and (not peak_window["enabled"] or peak_window["configured"])
             ),
-            "config_error": self._panel.dns_failover_config_error(),
+            "config_error": self.dns_failover_config_error(),
             "current_target": current_target,
-            "current_target_label": self._panel.dns_failover_manager.target_label(current_target),
+            "current_target_label": self.failover_manager.target_label(current_target),
             "record_name": config.record_name,
             "record_type": config.record_type,
             "record_content": record_content,
             "primary_content": resolved_contents["primary_content"],
             "backup_content": resolved_contents["backup_content"],
             "record_ttl": item.get("current_record_ttl") or (1 if config.record_proxied else config.record_ttl),
-            "record_proxied": bool(item.get("current_record_proxied"))
-            if item.get("current_record_proxied") is not None
-            else bool(config.record_proxied),
+            "record_proxied": (
+                bool(item.get("current_record_proxied"))
+                if item.get("current_record_proxied") is not None
+                else bool(config.record_proxied)
+            ),
             "probe_host": config.probe_host,
             "probe_port": config.probe_port,
             "failure_threshold": config.failure_threshold,
             "recovery_threshold": config.recovery_threshold,
             "last_probe_status": item.get("last_probe_status") or "unknown",
-            "last_probe_status_label": self._panel.dns_failover_probe_status_label(item.get("last_probe_status")),
+            "last_probe_status_label": self.dns_failover_probe_status_label(item.get("last_probe_status")),
             "last_probe_checked_at": item.get("last_probe_checked_at"),
-            "last_probe_checked_at_display": format_display_time(item.get("last_probe_checked_at"))
-            if item.get("last_probe_checked_at")
-            else "暂无",
+            "last_probe_checked_at_display": (
+                format_display_time(item.get("last_probe_checked_at")) if item.get("last_probe_checked_at") else "暂无"
+            ),
             "last_probe_error": item.get("last_probe_error") or "",
             "consecutive_failures": int(item.get("consecutive_failures") or 0),
             "consecutive_successes": int(item.get("consecutive_successes") or 0),
             "last_switch_at": item.get("last_switch_at"),
-            "last_switch_at_display": format_display_time(item.get("last_switch_at")) if item.get("last_switch_at") else "暂无",
+            "last_switch_at_display": (
+                format_display_time(item.get("last_switch_at")) if item.get("last_switch_at") else "暂无"
+            ),
             "last_switch_reason": item.get("last_switch_reason") or "",
             "last_error": item.get("last_error") or "",
             "backup_label": config.backup_label,
             "control_plane_backup_xray_enabled": bool(CONTROL_PLANE_BACKUP_XRAY_ENABLED),
             "control_plane_backup_xray_label": "控制面备用 Xray",
-            "backup_xray_mode": self._panel.backup_xray_mode() if hasattr(self._panel, "backup_xray_mode") else "disabled",
+            "backup_xray_mode": self._backup_xray_mode(),
             "fast_propagation_note": "已使用低 TTL；非代理记录建议保持 60 秒以尽快生效。",
             "peak_window": peak_window,
         }
+
     def dns_failover_config_error(self):
-        config = self._panel.dns_failover_manager.config
+        config = self.failover_manager.config
         if not config.enabled:
             return ""
         if not config.record_type_supported():
@@ -231,29 +296,30 @@ class DnsFailoverService:
             missing.append("CF_DNS_RECORD_NAME")
         if missing:
             return "缺少配置: " + ", ".join(missing)
-        resolved_contents = self._panel.resolve_dns_failover_contents()
+        resolved_contents = self.resolve_dns_failover_contents()
         if resolved_contents["error"]:
             return resolved_contents["error"]
-        peak_window = self._panel.dns_failover_peak_window_status()
+        peak_window = self.dns_failover_peak_window_status()
         if peak_window["enabled"] and not peak_window["configured"]:
             return peak_window["config_error"]
         return ""
+
     def resolve_dns_failover_contents(self):
-        config = self._panel.dns_failover_manager.config
+        config = self.failover_manager.config
         primary_content = str(config.primary_content or "").strip()
         backup_content = str(config.backup_content or "").strip()
         error = ""
         if not primary_content:
-            if self._panel.data_plane.is_remote:
+            if self.node_controller.is_remote:
                 error = "远端数据面启用 DNS 故障切换时，必须设置 DNS_FAILOVER_PRIMARY_CONTENT。"
             else:
                 try:
-                    primary_content = self._panel.data_plane.resolve_public_ip(timeout_seconds=max(config.timeout, 3.0))
+                    primary_content = self.node_controller.resolve_public_ip(timeout_seconds=max(config.timeout, 3.0))
                 except Exception as exc:
                     error = f"主数据面公网 IP 自动获取失败: {exc}"
         if not backup_content and not error and CONTROL_PLANE_BACKUP_XRAY_ENABLED:
             try:
-                backup_content = resolve_public_ip(timeout=max(config.timeout, 3.0))
+                backup_content = self.public_ip_resolver(timeout=max(config.timeout, 3.0))
             except Exception as exc:
                 error = str(exc)
         if not backup_content and not error:
@@ -263,12 +329,14 @@ class DnsFailoverService:
             "backup_content": backup_content,
             "error": error,
         }
+
     def dns_failover_probe_status_label(self, status):
         if status == "healthy":
             return "探测成功"
         if status == "unhealthy":
             return "探测失败"
         return "未检测"
+
     def write_dns_failover_history(self, conn, event_type, event_status, target="", record_content="", detail=""):
         conn.execute(
             """
@@ -293,6 +361,7 @@ class DnsFailoverService:
             )
             """
         )
+
     def update_dns_failover_state(self, conn, **values):
         allowed = {
             "current_target",
@@ -316,14 +385,16 @@ class DnsFailoverService:
             f"UPDATE dns_failover_state SET {assignments} WHERE singleton_id = 1",
             list(updates.values()),
         )
+
     def get_dns_failover_state_row(self, conn):
         row = conn.execute("SELECT * FROM dns_failover_state WHERE singleton_id = 1").fetchone()
         if row is None:
-            self._panel.ensure_dns_failover_schema(conn)
+            self.ensure_dns_failover_schema(conn)
             row = conn.execute("SELECT * FROM dns_failover_state WHERE singleton_id = 1").fetchone()
         return row
+
     def run_dns_failover_check(self, force=False):
-        status = self._panel.dns_failover_status()
+        status = self.dns_failover_status()
         if not status["enabled"]:
             return status
         if not status["configured"]:
@@ -335,15 +406,15 @@ class DnsFailoverService:
                 error_code="configuration_missing",
                 message=status.get("config_error", ""),
             )
-            with self._panel.write_lock:
-                with self._panel.connect() as conn:
+            with self.write_lock:
+                with self.repository.connect() as conn:
                     conn.execute("BEGIN IMMEDIATE")
-                    self._panel.update_dns_failover_state(conn, last_error=status["config_error"])
-                    self._panel.write_dns_failover_history(conn, "probe", "skipped", detail=status["config_error"])
+                    self.update_dns_failover_state(conn, last_error=status["config_error"])
+                    self.write_dns_failover_history(conn, "probe", "skipped", detail=status["config_error"])
                     conn.commit()
-            return self._panel.dns_failover_status()
+            return self.dns_failover_status()
 
-        probe = self._panel.dns_failover_manager.probe_once()
+        probe = self.failover_manager.probe_once()
         probe_status = "healthy" if probe["ok"] else "unhealthy"
         emit_business_event(
             "dns_failover.checked",
@@ -361,13 +432,13 @@ class DnsFailoverService:
                 message=probe.get("error", ""),
             )
         switch_result = None
-        with self._panel.write_lock:
-            with self._panel.connect() as conn:
+        with self.write_lock:
+            with self.repository.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                row = self._panel.get_dns_failover_state_row(conn)
+                row = self.get_dns_failover_state_row(conn)
                 current_target = str(row["current_target"] or "").strip() or "primary"
                 if current_target not in {"primary", "backup"}:
-                    inferred = self._panel.dns_failover_manager.current_target_from_content(
+                    inferred = self.failover_manager.current_target_from_content(
                         row["current_record_content"],
                         primary_content=status["primary_content"],
                         backup_content=status["backup_content"],
@@ -381,7 +452,7 @@ class DnsFailoverService:
                 else:
                     consecutive_failures += 1
                     consecutive_successes = 0
-                self._panel.update_dns_failover_state(
+                self.update_dns_failover_state(
                     conn,
                     last_probe_status=probe_status,
                     last_probe_checked_at=utc_iso_now(),
@@ -390,8 +461,8 @@ class DnsFailoverService:
                     consecutive_successes=consecutive_successes,
                     last_error="",
                 )
-                detail = probe["error"] or self._panel.dns_failover_probe_status_label(probe_status)
-                self._panel.write_dns_failover_history(
+                detail = probe["error"] or self.dns_failover_probe_status_label(probe_status)
+                self.write_dns_failover_history(
                     conn,
                     "probe",
                     "ok" if probe["ok"] else "error",
@@ -399,9 +470,9 @@ class DnsFailoverService:
                     record_content=row["current_record_content"] or "",
                     detail=detail,
                 )
-                peak_window = self._panel.dns_failover_peak_window_status()
+                peak_window = self.dns_failover_peak_window_status()
                 preferred_target = peak_window["preferred_target"] if peak_window["configured"] else "primary"
-                transition = self._panel.evaluate_dns_failover_transition(
+                transition = self.evaluate_dns_failover_transition(
                     current_target,
                     consecutive_failures,
                     consecutive_successes,
@@ -411,13 +482,14 @@ class DnsFailoverService:
                 conn.commit()
 
         if transition is not None:
-            switch_result = self._panel.switch_dns_target(transition["target"], reason=transition["reason"], auto=True)
-        return self._panel.dns_failover_status() if switch_result is None else switch_result
+            switch_result = self.switch_dns_target(transition["target"], reason=transition["reason"], auto=True)
+        return self.dns_failover_status() if switch_result is None else switch_result
+
     def switch_dns_target(self, target, reason="manual_switch", auto=False):
         target = str(target or "").strip().lower()
         if target not in {"primary", "backup"}:
             raise ValidationError("target 仅支持 primary 或 backup。")
-        status = self._panel.dns_failover_status()
+        status = self.dns_failover_status()
         if not status["enabled"]:
             raise ValidationError("DNS 故障切换未启用。")
         if not status["configured"]:
@@ -427,13 +499,13 @@ class DnsFailoverService:
         backup_content = status["backup_content"]
 
         try:
-            record = self._panel.dns_failover_manager.get_record()
+            record = self.failover_manager.get_record()
         except CloudflareApiError as exc:
-            with self._panel.write_lock:
-                with self._panel.connect() as conn:
+            with self.write_lock:
+                with self.repository.connect() as conn:
                     conn.execute("BEGIN IMMEDIATE")
-                    self._panel.update_dns_failover_state(conn, last_error=str(exc))
-                    self._panel.write_dns_failover_history(
+                    self.update_dns_failover_state(conn, last_error=str(exc))
+                    self.write_dns_failover_history(
                         conn,
                         "switch",
                         "error",
@@ -453,16 +525,16 @@ class DnsFailoverService:
                 )
             raise ValidationError(str(exc)) from exc
         current_content = str(record.get("content") or "").strip()
-        current_target = self._panel.dns_failover_manager.current_target_from_content(
+        current_target = self.failover_manager.current_target_from_content(
             current_content,
             primary_content=primary_content,
             backup_content=backup_content,
         )
         if current_target == target:
-            with self._panel.write_lock:
-                with self._panel.connect() as conn:
+            with self.write_lock:
+                with self.repository.connect() as conn:
                     conn.execute("BEGIN IMMEDIATE")
-                    self._panel.update_dns_failover_state(
+                    self.update_dns_failover_state(
                         conn,
                         current_target=target,
                         current_record_content=current_content,
@@ -470,7 +542,7 @@ class DnsFailoverService:
                         current_record_proxied=1 if record.get("proxied") else 0,
                         last_error="",
                     )
-                    self._panel.write_dns_failover_history(
+                    self.write_dns_failover_history(
                         conn,
                         "switch",
                         "noop",
@@ -485,20 +557,20 @@ class DnsFailoverService:
                 resource_type="dns",
                 metadata={"target": target, "automatic": auto},
             )
-            return self._panel.dns_failover_status()
+            return self.dns_failover_status()
 
         try:
-            updated = self._panel.dns_failover_manager.sync_target(
+            updated = self.failover_manager.sync_target(
                 target,
                 primary_content=primary_content,
                 backup_content=backup_content,
             )
         except CloudflareApiError as exc:
-            with self._panel.write_lock:
-                with self._panel.connect() as conn:
+            with self.write_lock:
+                with self.repository.connect() as conn:
                     conn.execute("BEGIN IMMEDIATE")
-                    self._panel.update_dns_failover_state(conn, last_error=str(exc))
-                    self._panel.write_dns_failover_history(
+                    self.update_dns_failover_state(conn, last_error=str(exc))
+                    self.write_dns_failover_history(
                         conn,
                         "switch",
                         "error",
@@ -520,15 +592,15 @@ class DnsFailoverService:
             raise ValidationError(str(exc)) from exc
 
         updated_content = str(updated.get("content") or "").strip()
-        updated_target = self._panel.dns_failover_manager.current_target_from_content(
+        updated_target = self.failover_manager.current_target_from_content(
             updated_content,
             primary_content=primary_content,
             backup_content=backup_content,
         )
-        with self._panel.write_lock:
-            with self._panel.connect() as conn:
+        with self.write_lock:
+            with self.repository.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                self._panel.update_dns_failover_state(
+                self.update_dns_failover_state(
                     conn,
                     current_target=updated_target if updated_target in {"primary", "backup"} else target,
                     current_record_content=updated_content,
@@ -538,7 +610,7 @@ class DnsFailoverService:
                     last_switch_reason=reason,
                     last_error="",
                 )
-                self._panel.write_dns_failover_history(
+                self.write_dns_failover_history(
                     conn,
                     "switch",
                     "ok",
@@ -553,30 +625,31 @@ class DnsFailoverService:
             resource_type="dns",
             metadata={"target": target, "automatic": auto},
         )
-        return self._panel.dns_failover_status()
+        return self.dns_failover_status()
+
     def refresh_dns_failover_record_snapshot(self):
-        status = self._panel.dns_failover_status()
+        status = self.dns_failover_status()
         if not status["enabled"] or not status["configured"]:
             return status
         try:
-            record = self._panel.dns_failover_manager.get_record()
+            record = self.failover_manager.get_record()
         except CloudflareApiError as exc:
-            with self._panel.write_lock:
-                with self._panel.connect() as conn:
+            with self.write_lock:
+                with self.repository.connect() as conn:
                     conn.execute("BEGIN IMMEDIATE")
-                    self._panel.update_dns_failover_state(conn, last_error=str(exc))
+                    self.update_dns_failover_state(conn, last_error=str(exc))
                     conn.commit()
-            return self._panel.dns_failover_status()
+            return self.dns_failover_status()
         current_content = str(record.get("content") or "").strip()
-        current_target = self._panel.dns_failover_manager.current_target_from_content(
+        current_target = self.failover_manager.current_target_from_content(
             current_content,
             primary_content=status["primary_content"],
             backup_content=status["backup_content"],
         )
-        with self._panel.write_lock:
-            with self._panel.connect() as conn:
+        with self.write_lock:
+            with self.repository.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                self._panel.update_dns_failover_state(
+                self.update_dns_failover_state(
                     conn,
                     current_target=current_target if current_target in {"primary", "backup"} else "primary",
                     current_record_content=current_content,
@@ -585,4 +658,4 @@ class DnsFailoverService:
                     last_error="",
                 )
                 conn.commit()
-        return self._panel.dns_failover_status()
+        return self.dns_failover_status()

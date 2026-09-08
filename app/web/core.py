@@ -1,7 +1,6 @@
 import atexit
 import logging
 import signal
-import threading
 import time
 from datetime import datetime
 
@@ -40,7 +39,7 @@ from ..config import (
     TENANT_SESSION_TOKEN_KEY,
     XRAY_CLIENT_CONFIG_PATH,
 )
-from ..helpers import human_bytes
+from ..helpers import format_optional_display_time, human_bytes
 from ..observability.logging import (
     REQUEST_ID_HEADER,
     bind_actor,
@@ -653,7 +652,9 @@ def build_customer_dashboard_state(customer, message="", level="info"):
         "customer": {
             "id": customer["id"],
             "email": customer["email"],
-            "last_login_at_display": state.format_optional_display_time(customer.get("last_login_at"), default="首次登录"),
+            "last_login_at_display": format_optional_display_time(
+                customer.get("last_login_at"), default="首次登录"
+            ),
         },
         "summary": {
             "service_count": len(services),
@@ -885,20 +886,8 @@ def handle_shutdown(signum, _frame):
 
 
 def main():
-    state.bootstrap()
-    maintenance_worker = threading.Thread(
-        target=state.maintenance_loop,
-        name="panel-maintenance",
-        daemon=True,
-    )
-    dns_failover_worker = threading.Thread(
-        target=state.dns_failover_loop,
-        name="dns-failover",
-        daemon=True,
-    )
-    maintenance_worker.start()
-    dns_failover_worker.start()
-    atexit.register(state.stop)
+    state.lifecycle.start()
+    atexit.register(state.lifecycle.stop)
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
     show_server_banner = flask_cli.show_server_banner
@@ -907,4 +896,4 @@ def main():
         app.run(host=PANEL_HOST, port=PANEL_PORT, threaded=True, use_reloader=False)
     finally:
         flask_cli.show_server_banner = show_server_banner
-        state.stop()
+        state.lifecycle.stop()

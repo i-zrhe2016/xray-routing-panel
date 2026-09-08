@@ -1,17 +1,19 @@
 from datetime import datetime
 
-
 from ..config import (
     DEFAULT_UPSTREAM_HOST,
     DEFAULT_UPSTREAM_PORT,
     LOCAL_TZ,
+    SEED_LISTEN_PORT,
 )
 from ..errors import ValidationError
 from ..helpers import (
     format_display_time,
     format_input_time,
+    generate_access_token,
     generate_subscription_token,
     generate_tenant_password,
+    generate_tenant_username,
     human_bytes,
     parse_data_size,
     parse_expiry,
@@ -23,13 +25,200 @@ from ..helpers import (
 )
 
 
-
 class PortsService:
-    def __init__(self, panel):
-        self._panel = panel
+    """Port queries and mutations backed by explicit persistence capabilities."""
+
+    def __init__(self, repository=None, renderer=None, write_lock=None):
+        self.repository = repository
+        self.renderer = renderer or repository
+        self.write_lock = write_lock
+
+    def ensure_port_schema(self, conn):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                listen_port INTEGER NOT NULL UNIQUE,
+                upstream_host TEXT NOT NULL,
+                upstream_port INTEGER NOT NULL,
+                tenant_token TEXT NOT NULL DEFAULT '',
+                subscription_token TEXT NOT NULL DEFAULT '',
+                tenant_username TEXT NOT NULL DEFAULT '',
+                tenant_password TEXT NOT NULL DEFAULT '',
+                expires_at TEXT,
+                traffic_limit_bytes INTEGER,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(ports)").fetchall()}
+        if "tenant_token" not in columns:
+            conn.execute("ALTER TABLE ports ADD COLUMN tenant_token TEXT NOT NULL DEFAULT ''")
+        if "subscription_token" not in columns:
+            conn.execute("ALTER TABLE ports ADD COLUMN subscription_token TEXT NOT NULL DEFAULT ''")
+        if "tenant_username" not in columns:
+            conn.execute("ALTER TABLE ports ADD COLUMN tenant_username TEXT NOT NULL DEFAULT ''")
+        if "tenant_password" not in columns:
+            conn.execute("ALTER TABLE ports ADD COLUMN tenant_password TEXT NOT NULL DEFAULT ''")
+        if "traffic_limit_bytes" not in columns:
+            conn.execute("ALTER TABLE ports ADD COLUMN traffic_limit_bytes INTEGER")
+        if "customer_id" not in columns:
+            conn.execute("ALTER TABLE ports ADD COLUMN customer_id INTEGER")
+        if "service_subscription_id" not in columns:
+            conn.execute("ALTER TABLE ports ADD COLUMN service_subscription_id INTEGER")
+        if "source_order_id" not in columns:
+            conn.execute("ALTER TABLE ports ADD COLUMN source_order_id INTEGER")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ports_tenant_token
+            ON ports(tenant_token)
+            WHERE tenant_token != ''
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ports_subscription_token
+            ON ports(subscription_token)
+            WHERE subscription_token != ''
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ports_tenant_username
+            ON ports(tenant_username)
+            WHERE tenant_username != ''
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ports_customer_id ON ports(customer_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ports_service_subscription_id ON ports(service_subscription_id)")
+        self.cleanup_expired_ports_in_tx(conn)
+        self.ensure_port_tokens_in_tx(conn)
+        self.ensure_port_credentials_in_tx(conn)
+
+    def generate_unique_port_token(self, conn, column_name):
+        if column_name not in {"tenant_token", "subscription_token"}:
+            raise ValueError("unsupported port token column")
+        for _ in range(16):
+            token = generate_access_token()
+            row = conn.execute(
+                f"SELECT 1 FROM ports WHERE {column_name} = ? LIMIT 1",
+                (token,),
+            ).fetchone()
+            if row is None:
+                return token
+        raise RuntimeError(f"无法为 {column_name} 生成唯一 token。")
+
+    def generate_unique_tenant_username(self, conn):
+        for _ in range(16):
+            username = generate_tenant_username()
+            row = conn.execute(
+                "SELECT 1 FROM ports WHERE tenant_username = ? LIMIT 1",
+                (username,),
+            ).fetchone()
+            if row is None:
+                return username
+        raise RuntimeError("无法生成唯一租户用户名。")
+
+    def ensure_port_tokens_in_tx(self, conn):
+        rows = conn.execute(
+            """
+            SELECT id, tenant_token, subscription_token
+            FROM ports
+            """
+        ).fetchall()
+        for row in rows:
+            updates = {}
+            if not str(row["tenant_token"] or "").strip():
+                updates["tenant_token"] = self.generate_unique_port_token(conn, "tenant_token")
+            if not str(row["subscription_token"] or "").strip():
+                updates["subscription_token"] = self.generate_unique_port_token(conn, "subscription_token")
+            if not updates:
+                continue
+            assignments = ", ".join(f"{column} = ?" for column in updates)
+            values = list(updates.values()) + [row["id"]]
+            conn.execute(f"UPDATE ports SET {assignments} WHERE id = ?", values)
+
+    def ensure_port_credentials_in_tx(self, conn):
+        rows = conn.execute(
+            """
+            SELECT id, tenant_username, tenant_password
+            FROM ports
+            """
+        ).fetchall()
+        for row in rows:
+            updates = {}
+            if not str(row["tenant_username"] or "").strip():
+                updates["tenant_username"] = self.generate_unique_tenant_username(conn)
+            if not str(row["tenant_password"] or "").strip():
+                updates["tenant_password"] = generate_tenant_password()
+            if not updates:
+                continue
+            assignments = ", ".join(f"{column} = ?" for column in updates)
+            values = list(updates.values()) + [row["id"]]
+            conn.execute(f"UPDATE ports SET {assignments} WHERE id = ?", values)
+
+    def ensure_subscription_token_in_tx(self, conn):
+        token = str(self.repository.get_state(conn, "subscription_token", "") or "").strip()
+        if token:
+            return token
+        token = generate_subscription_token()
+        self.repository.set_state(conn, "subscription_token", token)
+        return token
+
+    def normalize_upstream_targets(self):
+        with self.repository.connect() as conn:
+            conn.execute(
+                """
+                UPDATE ports
+                SET upstream_host = ?, upstream_port = ?
+                WHERE upstream_host != ? OR upstream_port != ?
+                """,
+                (
+                    DEFAULT_UPSTREAM_HOST,
+                    DEFAULT_UPSTREAM_PORT,
+                    DEFAULT_UPSTREAM_HOST,
+                    DEFAULT_UPSTREAM_PORT,
+                ),
+            )
+            conn.commit()
+
+    def seed_defaults(self):
+        if not SEED_LISTEN_PORT:
+            return
+        listen_port = parse_port(SEED_LISTEN_PORT, "默认监听端口")
+        with self.repository.connect() as conn:
+            exists = conn.execute("SELECT COUNT(*) FROM ports").fetchone()[0]
+            if exists:
+                return
+            now = utc_iso_now()
+            conn.execute(
+                """
+                INSERT INTO ports (
+                    listen_port, upstream_host, upstream_port, tenant_token, subscription_token,
+                    tenant_username, tenant_password,
+                    expires_at, enabled, note, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?, ?)
+                """,
+                (
+                    listen_port,
+                    DEFAULT_UPSTREAM_HOST,
+                    DEFAULT_UPSTREAM_PORT,
+                    self.generate_unique_port_token(conn, "tenant_token"),
+                    self.generate_unique_port_token(conn, "subscription_token"),
+                    self.generate_unique_tenant_username(conn),
+                    generate_tenant_password(),
+                    "默认初始化端口",
+                    now,
+                    now,
+                ),
+            )
+
     def query_ports(self):
         today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT
@@ -53,7 +242,8 @@ class PortsService:
                 (today,),
             ).fetchall()
 
-        return [self._panel.serialize_port_row(row) for row in rows]
+        return [self.serialize_port_row(row) for row in rows]
+
     def serialize_port_row(self, row):
         item = dict(row)
         item["expires_at_display"] = format_display_time(item["expires_at"])
@@ -95,23 +285,26 @@ class PortsService:
         item["status"] = status["code"]
         item["status_label"] = status["label"]
         return item
+
     def get_subscription_token(self):
-        with self._panel.write_lock:
-            with self._panel.connect() as conn:
+        with self.write_lock:
+            with self.repository.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                token = self._panel.ensure_subscription_token_in_tx(conn)
+                token = self.ensure_subscription_token_in_tx(conn)
                 conn.commit()
                 return token
+
     def rotate_subscription_token(self):
-        with self._panel.write_lock:
-            with self._panel.connect() as conn:
+        with self.write_lock:
+            with self.repository.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 token = generate_subscription_token()
-                self._panel.set_state(conn, "subscription_token", token)
+                self.repository.set_state(conn, "subscription_token", token)
                 conn.commit()
                 return token
+
     def get_port_subscription_record(self, listen_port):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             row = conn.execute(
                 """
                 SELECT
@@ -145,6 +338,7 @@ class PortsService:
         item["status"] = status["code"]
         item["status_label"] = status["label"]
         return item
+
     def query_summary(self, ports):
         summary = {
             "total_ports": len(ports),
@@ -169,6 +363,7 @@ class PortsService:
             else:
                 summary["disabled_ports"] += 1
         return summary
+
     def validate_port_payload(self, form):
         return {
             "listen_port": parse_port(form.get("listen_port"), "监听端口"),
@@ -178,6 +373,7 @@ class PortsService:
             "traffic_limit_bytes": parse_data_size(form.get("traffic_limit"), "流量上限"),
             "note": parse_note(form.get("note")),
         }
+
     def create_port(self, payload):
         def operation(conn):
             now = utc_iso_now()
@@ -193,9 +389,9 @@ class PortsService:
                     payload["listen_port"],
                     payload["upstream_host"],
                     payload["upstream_port"],
-                    self._panel.generate_unique_port_token(conn, "tenant_token"),
-                    self._panel.generate_unique_port_token(conn, "subscription_token"),
-                    self._panel.generate_unique_tenant_username(conn),
+                    self.generate_unique_port_token(conn, "tenant_token"),
+                    self.generate_unique_port_token(conn, "subscription_token"),
+                    self.generate_unique_tenant_username(conn),
                     generate_tenant_password(),
                     payload["expires_at"],
                     payload["traffic_limit_bytes"],
@@ -206,7 +402,8 @@ class PortsService:
             )
             return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
-        return self._panel.apply_mutation(operation)
+        return self.renderer.apply_mutation(operation)
+
     def update_port(self, port_id, payload):
         def operation(conn):
             now = utc_iso_now()
@@ -231,7 +428,8 @@ class PortsService:
                 ),
             )
 
-        self._panel.apply_mutation(operation)
+        self.renderer.apply_mutation(operation)
+
     def toggle_port(self, port_id):
         def operation(conn):
             row = conn.execute(
@@ -246,7 +444,7 @@ class PortsService:
                 if expires_at <= utc_now():
                     raise ValidationError("端口已过期，请先修改到期时间再启用。")
             if next_enabled and row["traffic_limit_bytes"] is not None:
-                usage_bytes = self._panel.get_port_usage_bytes(conn, row["listen_port"])
+                usage_bytes = self.get_port_usage_bytes(conn, row["listen_port"])
                 if usage_bytes >= int(row["traffic_limit_bytes"]):
                     raise ValidationError("端口已达到流量上限，请先提高上限再启用。")
             conn.execute(
@@ -254,7 +452,8 @@ class PortsService:
                 (next_enabled, utc_iso_now(), port_id),
             )
 
-        self._panel.apply_mutation(operation)
+        self.renderer.apply_mutation(operation)
+
     def delete_port(self, port_id):
         def operation(conn):
             row = conn.execute(
@@ -265,43 +464,47 @@ class PortsService:
                 raise ValidationError("端口记录不存在。")
             if row["customer_id"] is not None or row["service_subscription_id"] is not None:
                 raise ValidationError("商业化服务端口不能直接删除，请通过业务流程处理。")
-            self._panel.delete_port_in_tx(conn, port_id, row["listen_port"])
+            self.delete_port_in_tx(conn, port_id, row["listen_port"])
 
-        self._panel.apply_mutation(operation)
+        self.renderer.apply_mutation(operation)
+
     def disable_expired_ports(self, reload_xray=True):
-        return self._panel.disable_auto_stopped_ports(reload_xray=reload_xray)
+        return self.renderer.disable_auto_stopped_ports(reload_xray=reload_xray)
+
     def rotate_port_tenant_token(self, port_id):
         def operation(conn):
             row = conn.execute("SELECT id FROM ports WHERE id = ?", (port_id,)).fetchone()
             if row is None:
                 raise ValidationError("端口记录不存在。")
-            token = self._panel.generate_unique_port_token(conn, "tenant_token")
+            token = self.generate_unique_port_token(conn, "tenant_token")
             conn.execute(
                 "UPDATE ports SET tenant_token = ?, updated_at = ? WHERE id = ?",
                 (token, utc_iso_now(), port_id),
             )
             return token
 
-        return self._panel.apply_state_update(operation)
+        return self.repository.apply_state_update(operation)
+
     def rotate_port_subscription_token(self, port_id):
         def operation(conn):
             row = conn.execute("SELECT id FROM ports WHERE id = ?", (port_id,)).fetchone()
             if row is None:
                 raise ValidationError("端口记录不存在。")
-            token = self._panel.generate_unique_port_token(conn, "subscription_token")
+            token = self.generate_unique_port_token(conn, "subscription_token")
             conn.execute(
                 "UPDATE ports SET subscription_token = ?, updated_at = ? WHERE id = ?",
                 (token, utc_iso_now(), port_id),
             )
             return token
 
-        return self._panel.apply_state_update(operation)
+        return self.repository.apply_state_update(operation)
+
     def rotate_port_tenant_credentials(self, port_id):
         def operation(conn):
             row = conn.execute("SELECT id FROM ports WHERE id = ?", (port_id,)).fetchone()
             if row is None:
                 raise ValidationError("端口记录不存在。")
-            username = self._panel.generate_unique_tenant_username(conn)
+            username = self.generate_unique_tenant_username(conn)
             password = generate_tenant_password()
             conn.execute(
                 "UPDATE ports SET tenant_username = ?, tenant_password = ?, updated_at = ? WHERE id = ?",
@@ -309,7 +512,8 @@ class PortsService:
             )
             return {"tenant_username": username, "tenant_password": password}
 
-        return self._panel.apply_state_update(operation)
+        return self.repository.apply_state_update(operation)
+
     def get_port_usage_bytes(self, conn, listen_port):
         row = conn.execute(
             """
@@ -323,12 +527,14 @@ class PortsService:
         if row is None:
             return 0
         return int(row["usage_bytes"])
+
     def delete_port_in_tx(self, conn, port_id, listen_port):
         conn.execute("DELETE FROM ports WHERE id = ?", (port_id,))
         conn.execute("DELETE FROM traffic_totals WHERE listen_port = ?", (listen_port,))
         conn.execute("DELETE FROM traffic_daily WHERE listen_port = ?", (listen_port,))
         conn.execute("DELETE FROM upstream_probes WHERE listen_port = ?", (listen_port,))
         conn.execute("DELETE FROM upstream_probe_history WHERE listen_port = ?", (listen_port,))
+
     def cleanup_expired_ports_in_tx(self, conn):
         rows = conn.execute(
             """
@@ -342,11 +548,12 @@ class PortsService:
             (utc_iso_now(),),
         ).fetchall()
         for row in rows:
-            self._panel.delete_port_in_tx(conn, row["id"], row["listen_port"])
+            self.delete_port_in_tx(conn, row["id"], row["listen_port"])
         return len(rows)
+
     def get_port_by_tenant_token(self, tenant_token):
         today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             row = conn.execute(
                 """
                 SELECT
@@ -373,10 +580,11 @@ class PortsService:
 
         if row is None:
             return None
-        return self._panel.serialize_port_row(row)
+        return self.serialize_port_row(row)
+
     def get_port_by_tenant_username(self, tenant_username):
         today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             row = conn.execute(
                 """
                 SELECT
@@ -403,9 +611,10 @@ class PortsService:
 
         if row is None:
             return None
-        return self._panel.serialize_port_row(row)
+        return self.serialize_port_row(row)
+
     def get_port_subscription_record_by_token(self, subscription_token):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             row = conn.execute(
                 """
                 SELECT

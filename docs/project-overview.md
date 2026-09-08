@@ -330,7 +330,7 @@ docker compose run --rm xray-routing-panel-db-backup \
 后端（`app/` 已包化，`app/panel.py` 为入口，导出 `app`/`state`/`main`）：
 
 - [../app/web/](../app/web/): app factory（`create_app`）+ 按域分的视图模块（`admin_views`、`admin_api`、`customer_api`、`customer_views`、`portal_views`、`tenant_views`、`subscription_views`、`health`）与共享 `core.py`（presenter、auth 守卫、`@route` 收集器）
-- [../app/state/](../app/state/): `PanelState` facade，组合域 service（`CoreService`、`PortsService`、`TrafficService`、`ProbesService`、`DnsFailoverService`、`AiRoutingService`、`CommerceService`、`DiagnosticsService`）——控制逻辑、维护循环、统计同步、探针、DNS 故障切换、商业化。持有 `data_plane` 和 `ai_node` 两个受管节点控制器
+- [../app/state/](../app/state/): `PanelState` facade，组合域 service（`PortsService`、`TrafficService`、`ProbesService`、`DnsFailoverService`、`AiRoutingService`、`CommerceService`、`DiagnosticsService`）与 `ApplicationLifecycle`；维护循环位于 `../app/runtime/`，持有 `data_plane` 和 `ai_node` 两个受管节点控制器
 - [../app/config/](../app/config/) / [../app/auth/](../app/auth/): 配置常量/解析器、三套会话（管理员/租户/客户）与 CSRF
 - [../app/dns_failover.py](../app/dns_failover.py): Cloudflare API 客户端与切换策略
 - [../app/xray/render_config.py](../app/xray/render_config.py): 渲染 Xray 服务端和客户端产物（普通数据面、AI 节点、控制面备用）

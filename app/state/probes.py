@@ -1,7 +1,6 @@
 import socket
 from datetime import datetime, timezone
 
-
 from ..config import (
     DATAPLANE_PROBE_HOST,
     PROBE_DASHBOARD_RANGES,
@@ -17,15 +16,38 @@ from ..helpers import (
 from ..observability.logging import emit_business_event
 
 
-
 class ProbesService:
-    def __init__(self, panel):
-        self._panel = panel
+    """Upstream reachability sampling and dashboard aggregation."""
+
+    def __init__(self, repository=None, write_lock=None):
+        self.repository = repository
+        self.write_lock = write_lock
+
+    def ensure_probe_schema(self, conn):
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS upstream_probes (
+                listen_port INTEGER PRIMARY KEY,
+                is_reachable INTEGER NOT NULL,
+                checked_at TEXT NOT NULL,
+                failure_reason TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS upstream_probe_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                listen_port INTEGER NOT NULL,
+                is_reachable INTEGER NOT NULL,
+                checked_at TEXT NOT NULL,
+                failure_reason TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+
     def run_upstream_probes(self):
         if not PROBE_ENABLED:
             return 0
 
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT listen_port
@@ -61,8 +83,8 @@ class ProbesService:
                     metadata={"listen_port": row["listen_port"]},
                 )
 
-        with self._panel.write_lock:
-            with self._panel.connect() as conn:
+        with self.write_lock:
+            with self.repository.connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 for item in results:
                     conn.execute(
@@ -94,11 +116,12 @@ class ProbesService:
                 )
                 conn.commit()
         return len(results)
+
     def get_probe_dashboard(self, range_key):
         active_range_key = range_key if range_key in PROBE_DASHBOARD_RANGES else "24h"
         active_range = PROBE_DASHBOARD_RANGES[active_range_key]
         since_dt = utc_now().timestamp() - active_range["hours"] * 3600
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             if PROBE_TEST_LISTEN_PORT is not None:
                 test_port = conn.execute(
                     """
@@ -128,7 +151,7 @@ class ProbesService:
                     "requested_test_port": PROBE_TEST_LISTEN_PORT,
                     "range_key": active_range_key,
                     "range_label": active_range["label"],
-                    "range_options": self._panel.probe_dashboard_range_options(active_range_key),
+                    "range_options": self.probe_dashboard_range_options(active_range_key),
                 }
 
             history_rows = conn.execute(
@@ -215,8 +238,9 @@ class ProbesService:
             "requested_test_port": PROBE_TEST_LISTEN_PORT,
             "range_key": active_range_key,
             "range_label": active_range["label"],
-            "range_options": self._panel.probe_dashboard_range_options(active_range_key),
+            "range_options": self.probe_dashboard_range_options(active_range_key),
         }
+
     def probe_dashboard_range_options(self, active_range_key):
         return [
             {

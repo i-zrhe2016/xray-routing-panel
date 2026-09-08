@@ -353,7 +353,7 @@ class NodeControlTest(unittest.TestCase):
         os.environ["AI_DOMAIN_MANAGER_EXECUTION_MODE"] = "local"
         state = load_state_module(self.root).PanelState()
         completed = mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch("app.state.ai_routing.subprocess.run", return_value=completed) as run:
+        with mock.patch("app.xray.ai_routing.launcher.subprocess.run", return_value=completed) as run:
             state.ai_routing._trigger_ai_domain_manager("forced_fallback")
 
         command = run.call_args.args[0]

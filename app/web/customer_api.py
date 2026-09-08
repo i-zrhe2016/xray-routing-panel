@@ -23,6 +23,7 @@ from ..auth import (
 )
 from ..config import AUTH_ENABLED
 from ..errors import ValidationError
+from ..helpers import format_optional_display_time
 from ..subscriptions import parse_xray_client_profile
 from .core import (
     build_customer_dashboard_state,
@@ -45,7 +46,7 @@ def _serialize_customer(customer):
     return {
         "id": customer["id"],
         "email": customer["email"],
-        "last_login_at_display": state.format_optional_display_time(
+        "last_login_at_display": format_optional_display_time(
             customer.get("last_login_at"), default="首次登录"
         ),
     }

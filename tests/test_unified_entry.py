@@ -89,7 +89,7 @@ def test_gateway_empty_accounts_and_conflicting_port_fail_closed():
 
 
 def test_stats_add_legacy_and_user_counters_without_counting_unified_total():
-    from app.state.base import CoreService
+    from app.xray.stats import XrayStatsReader
 
     stats = [
         {"name": "inbound>>>panel-31098>>>traffic>>>uplink", "value": 10},
@@ -101,7 +101,10 @@ def test_stats_add_legacy_and_user_counters_without_counting_unified_total():
         data_plane_running=lambda: True,
         data_plane=SimpleNamespace(run_statsquery=lambda *args: SimpleNamespace(stdout=json.dumps({"stat": stats}))),
     )
-    assert CoreService(panel).read_xray_traffic_stats() == {31098: {"bytes_received": 30, "bytes_sent": 40}}
+    assert XrayStatsReader(
+        panel.data_plane,
+        running_check=panel.data_plane_running,
+    ).read_xray_traffic_stats() == {31098: {"bytes_received": 30, "bytes_sent": 40}}
 
 
 def test_access_logs_attribute_unified_users_and_keep_legacy_ports():

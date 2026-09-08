@@ -16,26 +16,25 @@ class DiagnosticsService:
     "port open but node unusable" drift that plain TCP probes miss.
     """
 
-    def __init__(self, panel):
-        self._panel = panel
+    def __init__(self, ports, node_controller):
+        self.ports = ports
+        self.node_controller = node_controller
 
     def diagnose_data_plane(self):
         profile, profile_error = parse_xray_client_profile()
         node_host = profile["server"] if profile else ""
         server_name = profile["server_name"] if profile else ""
 
-        ports = [port for port in self._panel.query_ports() if port.get("enabled")]
+        ports = [port for port in self.ports.query_ports() if port.get("enabled")]
         port_results = self._diagnose_ports(node_host, server_name, ports)
         consistency = self._check_config_consistency(profile)
 
-        status = self._panel.data_plane.status_summary()
+        status = self.node_controller.status_summary()
         tcp_ok = sum(1 for item in port_results if item["tcp_reachable"])
-        reality_ok = sum(
-            1 for item in port_results if item.get("reality") and item["reality"]["ok"]
-        )
+        reality_ok = sum(1 for item in port_results if item.get("reality") and item["reality"]["ok"])
         return {
             "generated_at": utc_iso_now(),
-            "data_plane_mode": self._panel.data_plane.mode,
+            "data_plane_mode": self.node_controller.mode,
             "management_target": status.get("management_target", ""),
             "subscription_profile_available": profile is not None,
             "subscription_error": profile_error,
@@ -86,9 +85,7 @@ class DiagnosticsService:
             entry["tcp_error"] = str(exc)[:200]
             return entry
         if server_name:
-            entry["reality"] = reality_handshake_probe(
-                node_host, listen_port, server_name, timeout=timeout
-            )
+            entry["reality"] = reality_handshake_probe(node_host, listen_port, server_name, timeout=timeout)
         return entry
 
     def _check_config_consistency(self, profile):
@@ -97,7 +94,7 @@ class DiagnosticsService:
             result["error"] = "订阅 profile 不可用，无法比对。"
             return result
 
-        live = self._panel.data_plane.read_live_server_config()
+        live = self.node_controller.read_live_server_config()
         if not live.get("available"):
             result["source"] = live.get("source", "")
             result["error"] = live.get("error", "无法读取数据面配置。")

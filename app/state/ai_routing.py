@@ -1,7 +1,5 @@
 import json
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 from ..config import (
@@ -14,32 +12,45 @@ from ..config import (
 )
 from ..errors import ValidationError
 from ..helpers import (
+    format_optional_display_time,
     utc_iso_now,
 )
 from ..observability.logging import emit_business_event
 from ..xray.ai_routing.candidates import build_ai_upstream_candidates
-from ..xray.ai_routing.manager import LOCK_BUSY_EXIT_CODE
+from ..xray.ai_routing.launcher import AiDomainManagerRunner
 from ..xray.ai_routing.repository import ensure_ai_domain_schema
 from ..xray.envfile import load_env_file
 from ..xray.operation_lock import LockBusyError, exclusive_file_lock
 
 
 class AiRoutingService:
-    def __init__(self, panel):
-        self._panel = panel
+    """AI route state and report orchestration with explicit collaborators."""
+
+    def __init__(self, repository=None, node_controller=None, manager_runner=None):
+        self.repository = repository
+        self.node_controller = node_controller
+        self.manager_runner = manager_runner or AiDomainManagerRunner(
+            execution_mode=AI_DOMAIN_MANAGER_EXECUTION_MODE,
+            container_name=AI_DOMAIN_MANAGER_CONTAINER_NAME,
+            docker_bin=AI_DOMAIN_MANAGER_DOCKER_BIN,
+        )
+
+    def ensure_ai_schema(self, conn):
+        ensure_ai_domain_schema(conn)
+
     def sync_data_plane_ai_state(self):
-        before = self._panel.read_ai_domain_report()
+        before = self.read_ai_domain_report()
         result = {
             "report_synced": False,
             "snapshot_synced": False,
         }
         try:
-            if self._panel.data_plane.supports_ai_report_pull():
-                result["report_synced"] = self._panel.data_plane.sync_ai_report_from_remote()
-            if self._panel.data_plane.supports_ai_domains_snapshot_pull():
-                snapshot = self._panel.data_plane.read_ai_domains_snapshot_from_remote()
+            if self.node_controller.supports_ai_report_pull():
+                result["report_synced"] = self.node_controller.sync_ai_report_from_remote()
+            if self.node_controller.supports_ai_domains_snapshot_pull():
+                snapshot = self.node_controller.read_ai_domains_snapshot_from_remote()
                 if snapshot.get("exists"):
-                    self._panel.replace_ai_domains_snapshot(snapshot.get("ai_domains", []))
+                    self.replace_ai_domains_snapshot(snapshot.get("ai_domains", []))
                     result["snapshot_synced"] = True
         except Exception as exc:
             emit_business_event(
@@ -50,7 +61,7 @@ class AiRoutingService:
                 exc=exc,
             )
             raise
-        after = self._panel.read_ai_domain_report()
+        after = self.read_ai_domain_report()
         before_signature = (before or {}).get("generated_at"), (before or {}).get("route_status")
         after_signature = (after or {}).get("generated_at"), (after or {}).get("route_status")
         if (result["report_synced"] or result["snapshot_synced"]) and before_signature != after_signature:
@@ -60,6 +71,7 @@ class AiRoutingService:
                 metadata={"route_status": (after or {}).get("route_status", "unknown")},
             )
         return result
+
     def replace_ai_domains_snapshot(self, rows):
         def operation(conn):
             ensure_ai_domain_schema(conn)
@@ -117,9 +129,10 @@ class AiRoutingService:
                 )
             return len(payloads)
 
-        return self._panel.apply_state_update(operation)
+        return self.repository.apply_state_update(operation)
+
     def ai_domain_sync_mode_label(self):
-        mode = self._panel.data_plane.mode
+        mode = self.node_controller.mode
         if mode == "ssh":
             return "远端镜像"
         if mode in {"local", "docker"}:
@@ -127,7 +140,7 @@ class AiRoutingService:
         return "本地缓存"
 
     def ai_routing_manual_state(self):
-        report = self._panel.read_ai_domain_report()
+        report = self.read_ai_domain_report()
         candidates = []
         if isinstance(report, dict):
             target = report.get("ai_target")
@@ -143,9 +156,9 @@ class AiRoutingService:
                     report_selected_index = int(target.get("selected_index"))
                 except (TypeError, ValueError):
                     report_selected_index = None
-        with self._panel.connect() as conn:
-            mode = str(self._panel.get_state(conn, "ai_routing_manual_mode", "auto") or "auto").strip().lower()
-            updated_at = str(self._panel.get_state(conn, "ai_routing_manual_updated_at", "") or "").strip()
+        with self.repository.connect() as conn:
+            mode = str(self.repository.get_state(conn, "ai_routing_manual_mode", "auto") or "auto").strip().lower()
+            updated_at = str(self.repository.get_state(conn, "ai_routing_manual_updated_at", "") or "").strip()
         if mode not in {"auto", "primary", "backup", "forced_fallback"}:
             mode = "auto"
         selected_index = {"primary": 0, "backup": 1}.get(mode, report_selected_index)
@@ -154,8 +167,7 @@ class AiRoutingService:
             candidate["number"] = index + 1
             candidate["selected"] = selected_index == index
             candidate["label"] = (
-                "主 AI 节点" if index == 0 else
-                ("备用 AI 节点" if index == 1 else f"AI 节点 {index + 1}")
+                "主 AI 节点" if index == 0 else ("备用 AI 节点" if index == 1 else f"AI 节点 {index + 1}")
             )
         return {
             "mode": mode,
@@ -166,7 +178,7 @@ class AiRoutingService:
                 "forced_fallback": "人工强制回退",
             }[mode],
             "updated_at": updated_at,
-            "updated_at_display": self._panel.format_optional_display_time(updated_at) if updated_at else "暂无",
+            "updated_at_display": format_optional_display_time(updated_at) if updated_at else "暂无",
             "candidates": candidates,
             "candidate_count": len(candidates),
         }
@@ -196,43 +208,7 @@ class AiRoutingService:
         ]
 
     def _trigger_ai_domain_manager(self, manual_mode=None):
-        run_options = {}
-        if AI_DOMAIN_MANAGER_EXECUTION_MODE == "local":
-            command = [sys.executable, "-m", "app.xray.ai_routing.runner", "--once"]
-            package_parent = Path(__file__).resolve().parents[2]
-            if not (package_parent / "app").is_dir():
-                package_parent = Path(__file__).resolve().parents[1]
-            run_options["cwd"] = str(package_parent)
-        else:
-            if not AI_DOMAIN_MANAGER_CONTAINER_NAME:
-                raise RuntimeError("AI 域名管理器容器未配置。")
-            command = [
-                AI_DOMAIN_MANAGER_DOCKER_BIN,
-                "exec",
-                AI_DOMAIN_MANAGER_CONTAINER_NAME,
-                "python3",
-                "-m",
-                "app.xray.ai_routing.runner",
-                "--once",
-        ]
-        if manual_mode is not None:
-            command.extend(("--manual-mode", str(manual_mode), "--manual-lock-held"))
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=240,
-                **run_options,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError("AI 路由重算超时，保持原有实际路由。") from exc
-        if completed.returncode == LOCK_BUSY_EXIT_CODE:
-            raise RuntimeError("AI 路由正在应用配置，请稍后重试。")
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "AI 域名管理器执行失败").strip()
-            raise RuntimeError(detail[-500:])
+        return self.manager_runner.run(manual_mode=manual_mode)
 
     def _manual_mode_lock_path(self):
         configured = os.environ.get("AI_DOMAIN_MANAGER_MANUAL_LOCK_PATH", "").strip()
@@ -255,10 +231,10 @@ class AiRoutingService:
         updated_at = utc_iso_now()
 
         def operation(conn):
-            self._panel.set_state(conn, "ai_routing_manual_mode", mode)
-            self._panel.set_state(conn, "ai_routing_manual_updated_at", updated_at)
+            self.repository.set_state(conn, "ai_routing_manual_mode", mode)
+            self.repository.set_state(conn, "ai_routing_manual_updated_at", updated_at)
 
-        if mode == "forced_fallback" and not self._panel.data_plane.is_configured():
+        if mode == "forced_fallback" and not self.node_controller.is_configured():
             raise ValidationError("数据面未配置，无法应用 AI 回退。")
         try:
             # Hold a second shared gate across the child manager and the final
@@ -274,7 +250,7 @@ class AiRoutingService:
                 # old route.
                 self._trigger_ai_domain_manager(mode)
                 try:
-                    self._panel.apply_state_update(operation)
+                    self.repository.apply_state_update(operation)
                 except Exception:
                     # The node is already on the requested route.  If the
                     # final panel state commit fails, make a best-effort
@@ -323,16 +299,26 @@ class AiRoutingService:
         if reason:
             return reason
         return "未知状态"
+
     def ai_route_status_tone(self, status):
         status_text = str(status or "").strip().lower()
         if status_text in {"applied", "manual_selected"}:
             return "ok"
-        if status_text in {"fallback_to_primary", "probe_error", "manual_fallback", "manual_target_unreachable", "idle", "disabled"}:
+        if status_text in {
+            "fallback_to_primary",
+            "probe_error",
+            "manual_fallback",
+            "manual_target_unreachable",
+            "idle",
+            "disabled",
+        }:
             return "warn"
         return "bad"
+
     def ai_source_label(self, value):
         text = str(value or "").strip()
         return text or "未标记"
+
     def decode_json_text_list(self, value):
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]
@@ -346,8 +332,9 @@ class AiRoutingService:
         if not isinstance(parsed, list):
             return []
         return [str(item).strip() for item in parsed if str(item).strip()]
+
     def serialize_ai_report_domain(self, item):
-        protocols = self._panel.decode_json_text_list(item.get("protocols", []))
+        protocols = self.decode_json_text_list(item.get("protocols", []))
         return {
             "domain": str(item.get("domain", "")).strip(),
             "hits": int(item.get("hits", 0) or 0),
@@ -357,30 +344,35 @@ class AiRoutingService:
             "protocols_display": ", ".join(protocols) if protocols else "暂无",
             "first_seen": str(item.get("first_seen") or "").strip() or None,
             "last_seen": str(item.get("last_seen") or "").strip() or None,
-            "first_seen_display": self._panel.format_optional_display_time(item.get("first_seen")),
-            "last_seen_display": self._panel.format_optional_display_time(item.get("last_seen")),
+            "first_seen_display": format_optional_display_time(item.get("first_seen")),
+            "last_seen_display": format_optional_display_time(item.get("last_seen")),
         }
+
     def serialize_ai_domain_snapshot_row(self, row):
         item = dict(row)
-        protocols = self._panel.decode_json_text_list(item.get("last_protocols", "[]"))
+        protocols = self.decode_json_text_list(item.get("last_protocols", "[]"))
         return {
             **item,
             "classification": str(item.get("classification", "ai") or "ai").strip() or "ai",
-            "source_display": self._panel.ai_source_label(item.get("source")),
+            "source_display": self.ai_source_label(item.get("source")),
             "protocols": protocols,
             "protocols_display": ", ".join(protocols) if protocols else "暂无",
-            "first_seen_display": self._panel.format_optional_display_time(item.get("first_seen")),
-            "last_seen_display": self._panel.format_optional_display_time(item.get("last_seen")),
-            "updated_at_display": self._panel.format_optional_display_time(item.get("updated_at")),
-            "last_report_window_start_display": self._panel.format_optional_display_time(
+            "first_seen_display": format_optional_display_time(item.get("first_seen")),
+            "last_seen_display": format_optional_display_time(item.get("last_seen")),
+            "updated_at_display": format_optional_display_time(item.get("updated_at")),
+            "last_report_window_start_display": format_optional_display_time(
                 item.get("last_report_window_start")
             ),
-            "last_report_window_end_display": self._panel.format_optional_display_time(
+            "last_report_window_end_display": format_optional_display_time(
                 item.get("last_report_window_end")
             ),
         }
+
     def read_ai_domain_report(self):
-        report_path = self._panel.data_plane.config.source_ai_report_path or self._panel.data_plane_ai_report_source_path()
+        report_path = self.node_controller.config.source_ai_report_path or (
+            XRAY_ENV_FILE_PATH.parent / "reports" / "hourly-domains" / "latest.json"
+        )
+        report_path = Path(report_path)
         if not report_path.is_file():
             return None
         try:
@@ -400,7 +392,7 @@ class AiRoutingService:
         for raw_item in payload.get("domains", []):
             if not isinstance(raw_item, dict):
                 continue
-            domain_item = self._panel.serialize_ai_report_domain(raw_item)
+            domain_item = self.serialize_ai_report_domain(raw_item)
             if domain_item["domain"]:
                 domains.append(domain_item)
         current_ai_domains = [item for item in domains if item["classification"] == "ai"]
@@ -414,11 +406,11 @@ class AiRoutingService:
 
         return {
             "generated_at": str(payload.get("generated_at") or "").strip() or None,
-            "generated_at_display": self._panel.format_optional_display_time(payload.get("generated_at")),
+            "generated_at_display": format_optional_display_time(payload.get("generated_at")),
             "window_start": str(payload.get("window_start") or "").strip() or None,
-            "window_start_display": self._panel.format_optional_display_time(payload.get("window_start")),
+            "window_start_display": format_optional_display_time(payload.get("window_start")),
             "window_end": str(payload.get("window_end") or "").strip() or None,
-            "window_end_display": self._panel.format_optional_display_time(payload.get("window_end")),
+            "window_end_display": format_optional_display_time(payload.get("window_end")),
             "unique_domains": int(payload.get("unique_domains", len(domains)) or 0),
             "ai_domain_count": len(current_ai_domains),
             "domains": domains,
@@ -426,16 +418,17 @@ class AiRoutingService:
             "protocols": [item for item in payload.get("protocols", []) if isinstance(item, dict)],
             "route_status": route_status_code,
             "route_status_reason": route_status_reason,
-            "route_status_label": self._panel.ai_route_status_label(route_status_code, route_status_reason),
-            "route_status_tone": self._panel.ai_route_status_tone(route_status_code),
+            "route_status_label": self.ai_route_status_label(route_status_code, route_status_reason),
+            "route_status_tone": self.ai_route_status_tone(route_status_code),
             "config_changed": bool(route_status.get("config_changed")),
             "config_retried": bool(route_status.get("config_retried")),
-            "pending_domains_without_classifier": self._panel.normalize_pending_domain_count(
+            "pending_domains_without_classifier": self.normalize_pending_domain_count(
                 route_status.get("pending_domains_without_classifier", 0)
             ),
             "ai_target": ai_target,
             "panel_target": panel_target,
         }
+
     def normalize_pending_domain_count(self, value):
         if isinstance(value, (list, tuple, set, dict)):
             return len(value)
@@ -443,8 +436,9 @@ class AiRoutingService:
             return int(value or 0)
         except (TypeError, ValueError):
             return 0
+
     def query_ai_domain_aggregate(self):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             row = conn.execute(
                 """
                 SELECT
@@ -458,10 +452,11 @@ class AiRoutingService:
             "total_ai_domains": int(row["total_ai_domains"] or 0),
             "total_hits": int(row["total_hits"] or 0),
             "updated_at": row["updated_at"],
-            "updated_at_display": self._panel.format_optional_display_time(row["updated_at"]),
+            "updated_at_display": format_optional_display_time(row["updated_at"]),
         }
+
     def query_top_ai_domains(self, limit=100):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT
@@ -483,9 +478,10 @@ class AiRoutingService:
                 """,
                 (int(limit),),
             ).fetchall()
-        return [self._panel.serialize_ai_domain_snapshot_row(row) for row in rows]
+        return [self.serialize_ai_domain_snapshot_row(row) for row in rows]
+
     def query_ai_domain_source_breakdown(self):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT
@@ -504,17 +500,18 @@ class AiRoutingService:
         return [
             {
                 "source": row["source"],
-                "source_display": self._panel.ai_source_label(row["source"]),
+                "source_display": self.ai_source_label(row["source"]),
                 "domain_count": int(row["domain_count"] or 0),
                 "total_hits": int(row["total_hits"] or 0),
                 "updated_at": row["updated_at"],
-                "updated_at_display": self._panel.format_optional_display_time(row["updated_at"]),
+                "updated_at_display": format_optional_display_time(row["updated_at"]),
             }
             for row in rows
         ]
+
     def ai_routing_status(self, sync_error=""):
-        report = self._panel.read_ai_domain_report()
-        aggregate = self._panel.query_ai_domain_aggregate()
+        report = self.read_ai_domain_report()
+        aggregate = self.query_ai_domain_aggregate()
         manual = self.ai_routing_manual_state()
         configured = AI_ROUTING_ENABLED
         if manual["mode"] == "forced_fallback" and configured:
@@ -542,7 +539,7 @@ class AiRoutingService:
             "status": status_code,
             "status_label": status_label,
             "status_tone": tone,
-            "sync_mode_label": self._panel.ai_domain_sync_mode_label(),
+            "sync_mode_label": self.ai_domain_sync_mode_label(),
             "report_generated_at_display": report["generated_at_display"] if report else "暂无",
             "current_ai_domains": report["ai_domain_count"] if report else 0,
             "total_ai_domains": aggregate["total_ai_domains"],
@@ -554,21 +551,20 @@ class AiRoutingService:
             "ai_candidate_count": manual["candidate_count"],
             "sync_error": str(sync_error or "").strip(),
         }
+
     def query_ai_domain_overview(self, sync_error=""):
-        report = self._panel.read_ai_domain_report()
-        aggregate = self._panel.query_ai_domain_aggregate()
+        report = self.read_ai_domain_report()
+        aggregate = self.query_ai_domain_aggregate()
         return {
             "available": AI_ROUTING_ENABLED and bool(report or aggregate["total_ai_domains"] > 0),
             "enabled": AI_ROUTING_ENABLED,
-            "sync_mode": self._panel.data_plane.mode,
-            "sync_mode_label": self._panel.ai_domain_sync_mode_label(),
+            "sync_mode": self.node_controller.mode,
+            "sync_mode_label": self.ai_domain_sync_mode_label(),
             "sync_error": str(sync_error or "").strip(),
             "report_available": report is not None,
             "current_ai_domains": report["ai_domain_count"] if report else 0,
             "unique_domains": report["unique_domains"] if report else 0,
-            "report_generated_at_display": (
-                report["generated_at_display"] if report else "暂无"
-            ),
+            "report_generated_at_display": (report["generated_at_display"] if report else "暂无"),
             "route_status": report["route_status"] if report else "unknown",
             "route_status_label": report["route_status_label"] if report else "暂无报告",
             "route_status_tone": report["route_status_tone"] if report else "warn",
@@ -576,16 +572,17 @@ class AiRoutingService:
             "total_hits": aggregate["total_hits"],
             "aggregate_updated_at_display": aggregate["updated_at_display"],
         }
+
     def get_ai_domain_dashboard(self, sync_error=""):
-        report = self._panel.read_ai_domain_report()
-        aggregate = self._panel.query_ai_domain_aggregate()
-        top_ai_domains = self._panel.query_top_ai_domains()
-        source_breakdown = self._panel.query_ai_domain_source_breakdown()
+        report = self.read_ai_domain_report()
+        aggregate = self.query_ai_domain_aggregate()
+        top_ai_domains = self.query_top_ai_domains()
+        source_breakdown = self.query_ai_domain_source_breakdown()
         return {
             "available": AI_ROUTING_ENABLED and bool(report or top_ai_domains),
             "enabled": AI_ROUTING_ENABLED,
-            "sync_mode": self._panel.data_plane.mode,
-            "sync_mode_label": self._panel.ai_domain_sync_mode_label(),
+            "sync_mode": self.node_controller.mode,
+            "sync_mode_label": self.ai_domain_sync_mode_label(),
             "sync_error": str(sync_error or "").strip(),
             "report": (
                 report

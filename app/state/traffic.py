@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 
-
 from ..config import (
     LOCAL_TZ,
     XRAY_ACCESS_LOG_PATH,
@@ -10,36 +9,73 @@ from ..helpers import (
     utc_iso_now,
     utc_now,
 )
-
 from ._constants import XRAY_ACCESS_LOG_LINE_RE
 
 
 class TrafficService:
-    def __init__(self, panel):
-        self._panel = panel
+    """Traffic synchronization using explicit storage, node and mutation ports."""
+
+    def __init__(
+        self,
+        repository=None,
+        node_controller=None,
+        stats_reader=None,
+        renderer=None,
+        write_lock=None,
+    ):
+        self.repository = repository
+        self.node_controller = node_controller
+        self.stats_reader = stats_reader if stats_reader is not None else repository
+        self.renderer = renderer if renderer is not None else repository
+        self.write_lock = write_lock
+
+    def ensure_traffic_schema(self, conn):
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS traffic_totals (
+                listen_port INTEGER PRIMARY KEY,
+                total_connections INTEGER NOT NULL DEFAULT 0,
+                total_bytes_sent INTEGER NOT NULL DEFAULT 0,
+                total_bytes_received INTEGER NOT NULL DEFAULT 0,
+                last_seen TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS traffic_daily (
+                listen_port INTEGER NOT NULL,
+                stat_date TEXT NOT NULL,
+                total_connections INTEGER NOT NULL DEFAULT 0,
+                total_bytes_sent INTEGER NOT NULL DEFAULT 0,
+                total_bytes_received INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (listen_port, stat_date)
+            );
+            """
+        )
+
     def sync_traffic_state(self):
-        with self._panel.write_lock:
-            return self._panel.sync_traffic_state_locked()
+        with self.write_lock:
+            return self.sync_traffic_state_locked()
+
     def sync_traffic_state_locked(self):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            log_updates = self._panel.sync_xray_access_log_in_tx(conn)
-            byte_updates = self._panel.sync_xray_traffic_stats_in_tx(conn)
+            log_updates = self.sync_xray_access_log_in_tx(conn)
+            byte_updates = self.sync_xray_traffic_stats_in_tx(conn)
             conn.commit()
             return {
                 "connection_updates": log_updates,
                 "byte_updates": byte_updates,
             }
+
     def sync_xray_access_log_in_tx(self, conn):
-        current_offset = int(self._panel.get_state(conn, "xray_access_log_offset", "0"))
-        recorded_inode = self._panel.get_state(conn, "xray_access_log_inode", "")
+        current_offset = int(self.repository.get_state(conn, "xray_access_log_offset", "0"))
+        recorded_inode = self.repository.get_state(conn, "xray_access_log_inode", "")
         current_inode = ""
         new_offset = 0
         lines = []
 
-        if self._panel.data_plane.supports_logs():
+        if self.node_controller.supports_logs():
             try:
-                payload = self._panel.data_plane.read_access_log_delta(recorded_inode, current_offset)
+                payload = self.node_controller.read_access_log_delta(recorded_inode, current_offset)
             except RuntimeError:
                 return 0
             if not payload["exists"]:
@@ -63,7 +99,7 @@ class TrafficService:
 
         aggregates = {}
         for line in lines:
-            parsed = self._panel.parse_xray_access_log_line(line)
+            parsed = self.parse_xray_access_log_line(line)
             if parsed is None:
                 continue
             listen_port, stat_date, seen_at = parsed
@@ -113,9 +149,10 @@ class TrafficService:
                 ),
             )
 
-        self._panel.set_state(conn, "xray_access_log_inode", current_inode)
-        self._panel.set_state(conn, "xray_access_log_offset", str(new_offset))
+        self.repository.set_state(conn, "xray_access_log_inode", current_inode)
+        self.repository.set_state(conn, "xray_access_log_offset", str(new_offset))
         return len(aggregates)
+
     def parse_xray_access_log_line(self, line):
         match = XRAY_ACCESS_LOG_LINE_RE.match(line.strip())
         if match is None:
@@ -144,8 +181,9 @@ class TrafficService:
         seen_at = seen_local.astimezone(timezone.utc).isoformat(timespec="seconds")
         stat_date = seen_at[:10]
         return listen_port, stat_date, seen_at
+
     def sync_xray_traffic_stats_in_tx(self, conn):
-        stats = self._panel.read_xray_traffic_stats()
+        stats = self.stats_reader.read_xray_traffic_stats()
         if not stats:
             return 0
 
@@ -192,6 +230,7 @@ class TrafficService:
                 ),
             )
         return len(stats)
+
     def reset_port_usage_in_tx(self, conn, listen_port):
         conn.execute(
             """
@@ -209,6 +248,7 @@ class TrafficService:
             """,
             (listen_port,),
         )
+
     def reset_port_traffic(self, port_id):
         def operation(conn):
             row = conn.execute(
@@ -266,4 +306,4 @@ class TrafficService:
             )
             return restored
 
-        return self._panel.apply_mutation(operation)
+        return self.renderer.apply_mutation(operation)

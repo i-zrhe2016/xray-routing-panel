@@ -25,14 +25,20 @@ from ..helpers import (
     utc_iso_now,
     utc_now,
 )
-from ..xray.operation_lock import LockBusyError, exclusive_file_lock
-
+from ..xray.operation_lock import LockBusyError
 from ._constants import PLAN_SLUG_RE
 
 
 class CommerceService:
-    def __init__(self, panel):
-        self._panel = panel
+    """Plans, customers, orders and fulfilment with explicit domain ports."""
+
+    def __init__(self, repository=None, renderer=None, ports=None, traffic=None, write_lock=None):
+        self.repository = repository
+        self.renderer = renderer if renderer is not None else repository
+        self.ports = ports
+        self.traffic = traffic
+        self.write_lock = write_lock
+
     def ensure_commerce_schema(self, conn):
         conn.executescript(
             """
@@ -115,12 +121,17 @@ class CommerceService:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_service_subscription_id ON orders(service_subscription_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_service_subscriptions_customer_id ON service_subscriptions(customer_id)")
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_service_subscriptions_port_id ON service_subscriptions(port_id) WHERE port_id IS NOT NULL")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_service_subscriptions_customer_id ON service_subscriptions(customer_id)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_subscriptions_port_id ON service_subscriptions(port_id) WHERE port_id IS NOT NULL"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_order_payment_submissions_order_id ON order_payment_submissions(order_id)"
         )
-        self._panel.ensure_commerce_settings_in_tx(conn)
+        self.ensure_commerce_settings_in_tx(conn)
+
     def ensure_commerce_settings_in_tx(self, conn):
         defaults = {
             "commerce_payment_qr_code_url": "",
@@ -128,20 +139,23 @@ class CommerceService:
             "commerce_order_expiry_hours": str(COMMERCE_ORDER_EXPIRY_HOURS_DEFAULT),
         }
         for key, value in defaults.items():
-            if self._panel.get_state(conn, key, None) is None:
-                self._panel.set_state(conn, key, value)
+            if self.repository.get_state(conn, key, None) is None:
+                self.repository.set_state(conn, key, value)
+
     def get_commerce_settings(self):
-        with self._panel.connect() as conn:
-            self._panel.ensure_commerce_settings_in_tx(conn)
-            return self._panel.serialize_commerce_settings(conn)
+        with self.repository.connect() as conn:
+            self.ensure_commerce_settings_in_tx(conn)
+            return self.serialize_commerce_settings(conn)
+
     def serialize_commerce_settings(self, conn):
-        payment_qr_code_url = str(self._panel.get_state(conn, "commerce_payment_qr_code_url", "") or "").strip()
-        payment_instructions = str(
-            self._panel.get_state(conn, "commerce_payment_instructions", "") or ""
-        ).strip()
+        payment_qr_code_url = str(self.repository.get_state(conn, "commerce_payment_qr_code_url", "") or "").strip()
+        payment_instructions = str(self.repository.get_state(conn, "commerce_payment_instructions", "") or "").strip()
         try:
             order_expiry_hours = int(
-                str(self._panel.get_state(conn, "commerce_order_expiry_hours", COMMERCE_ORDER_EXPIRY_HOURS_DEFAULT) or COMMERCE_ORDER_EXPIRY_HOURS_DEFAULT)
+                str(
+                    self.repository.get_state(conn, "commerce_order_expiry_hours", COMMERCE_ORDER_EXPIRY_HOURS_DEFAULT)
+                    or COMMERCE_ORDER_EXPIRY_HOURS_DEFAULT
+                )
             )
         except ValueError:
             order_expiry_hours = COMMERCE_ORDER_EXPIRY_HOURS_DEFAULT
@@ -155,6 +169,7 @@ class CommerceService:
             "payment_proof_max_bytes": PAYMENT_PROOF_MAX_BYTES,
             "payment_proof_max_display": human_bytes(PAYMENT_PROOF_MAX_BYTES),
         }
+
     def update_commerce_settings(self, payload):
         instructions = str(payload.get("payment_instructions", "") or "").strip()
         if len(instructions) > 1000:
@@ -169,12 +184,13 @@ class CommerceService:
             raise ValidationError("订单有效期必须是正整数小时。")
 
         def operation(conn):
-            self._panel.set_state(conn, "commerce_payment_qr_code_url", payment_qr_code_url)
-            self._panel.set_state(conn, "commerce_payment_instructions", instructions)
-            self._panel.set_state(conn, "commerce_order_expiry_hours", str(order_expiry_hours))
-            return self._panel.serialize_commerce_settings(conn)
+            self.repository.set_state(conn, "commerce_payment_qr_code_url", payment_qr_code_url)
+            self.repository.set_state(conn, "commerce_payment_instructions", instructions)
+            self.repository.set_state(conn, "commerce_order_expiry_hours", str(order_expiry_hours))
+            return self.serialize_commerce_settings(conn)
 
-        return self._panel.apply_state_update(operation)
+        return self.repository.apply_state_update(operation)
+
     def validate_customer_password(self, password, confirm_password=""):
         raw_password = str(password or "")
         if len(raw_password) < 8:
@@ -184,6 +200,7 @@ class CommerceService:
         if confirm_password != "" and raw_password != str(confirm_password or ""):
             raise ValidationError("两次输入的密码不一致。")
         return raw_password
+
     def slugify_plan_value(self, value):
         slug = PLAN_SLUG_RE.sub("-", str(value or "").strip().lower()).strip("-")
         if not slug:
@@ -191,10 +208,12 @@ class CommerceService:
         if len(slug) > 80:
             raise ValidationError("套餐 slug 不能超过 80 个字符。")
         return slug
+
     def parse_bool_like(self, value):
         if isinstance(value, bool):
             return value
         return str(value or "").strip().lower() not in {"", "0", "false", "off", "no"}
+
     def validate_plan_payload(self, payload):
         name = str(payload.get("name", "") or "").strip()
         if not name:
@@ -205,7 +224,7 @@ class CommerceService:
         if len(description) > 1000:
             raise ValidationError("套餐说明不能超过 1000 个字符。")
         slug_source = str(payload.get("slug", "") or "").strip() or name
-        slug = self._panel.slugify_plan_value(slug_source)
+        slug = self.slugify_plan_value(slug_source)
 
         try:
             price_fen = int(str(payload.get("price_fen", "") or "").strip())
@@ -238,9 +257,10 @@ class CommerceService:
             "currency": "CNY",
             "duration_days": duration_days,
             "traffic_limit_bytes": traffic_limit_bytes,
-            "enabled": 1 if self._panel.parse_bool_like(payload.get("enabled", True)) else 0,
+            "enabled": 1 if self.parse_bool_like(payload.get("enabled", True)) else 0,
             "sort_order": sort_order,
         }
+
     def serialize_plan_row(self, row):
         item = dict(row)
         item["enabled"] = bool(item.get("enabled"))
@@ -248,8 +268,9 @@ class CommerceService:
         item["traffic_limit_display"] = human_bytes(item["traffic_limit_bytes"])
         item["status_label"] = "上架中" if item["enabled"] else "已下架"
         return item
+
     def query_plans(self, public_only=False):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             sql = """
                 SELECT
                     id,
@@ -271,9 +292,10 @@ class CommerceService:
                 sql += " WHERE enabled = 1"
             sql += " ORDER BY enabled DESC, sort_order ASC, id ASC"
             rows = conn.execute(sql, params).fetchall()
-        return [self._panel.serialize_plan_row(row) for row in rows]
+        return [self.serialize_plan_row(row) for row in rows]
+
     def get_plan_by_slug(self, slug, public_only=False):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             sql = """
                 SELECT
                     id,
@@ -297,9 +319,10 @@ class CommerceService:
             row = conn.execute(sql, params).fetchone()
         if row is None:
             return None
-        return self._panel.serialize_plan_row(row)
+        return self.serialize_plan_row(row)
+
     def get_plan_by_id(self, plan_id):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             row = conn.execute(
                 """
                 SELECT
@@ -322,7 +345,8 @@ class CommerceService:
             ).fetchone()
         if row is None:
             return None
-        return self._panel.serialize_plan_row(row)
+        return self.serialize_plan_row(row)
+
     def create_plan(self, payload):
         def operation(conn):
             now = utc_iso_now()
@@ -348,7 +372,8 @@ class CommerceService:
                 ),
             )
 
-        self._panel.apply_state_update(operation)
+        self.repository.apply_state_update(operation)
+
     def update_plan(self, plan_id, payload):
         def operation(conn):
             existing = conn.execute("SELECT id FROM plans WHERE id = ?", (plan_id,)).fetchone()
@@ -376,10 +401,11 @@ class CommerceService:
                 ),
             )
 
-        self._panel.apply_state_update(operation)
+        self.repository.apply_state_update(operation)
+
     def create_customer(self, email, password):
         normalized_email = normalize_customer_email(email)
-        raw_password = self._panel.validate_customer_password(password)
+        raw_password = self.validate_customer_password(password)
 
         def operation(conn):
             now = utc_iso_now()
@@ -393,10 +419,11 @@ class CommerceService:
                 (normalized_email, password_hash, now, now),
             )
 
-        self._panel.apply_state_update(operation)
+        self.repository.apply_state_update(operation)
+
     def get_customer_by_email(self, email):
         normalized_email = normalize_customer_email(email)
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             row = conn.execute(
                 """
                 SELECT id, email, password_hash, status, created_at, updated_at, last_login_at
@@ -407,8 +434,9 @@ class CommerceService:
                 (normalized_email,),
             ).fetchone()
         return dict(row) if row is not None else None
+
     def get_customer_by_id(self, customer_id):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             row = conn.execute(
                 """
                 SELECT id, email, password_hash, status, created_at, updated_at, last_login_at
@@ -419,6 +447,7 @@ class CommerceService:
                 (customer_id,),
             ).fetchone()
         return dict(row) if row is not None else None
+
     def touch_customer_login(self, customer_id):
         def operation(conn):
             conn.execute(
@@ -426,7 +455,8 @@ class CommerceService:
                 (utc_iso_now(), utc_iso_now(), customer_id),
             )
 
-        self._panel.apply_state_update(operation)
+        self.repository.apply_state_update(operation)
+
     def order_status_label(self, status):
         mapping = {
             "pending_payment": "待付款",
@@ -437,6 +467,7 @@ class CommerceService:
             "expired": "已过期",
         }
         return mapping.get(str(status or "").strip(), "未知")
+
     def order_status_tone(self, status):
         mapping = {
             "pending_payment": "warn",
@@ -447,6 +478,7 @@ class CommerceService:
             "expired": "bad",
         }
         return mapping.get(str(status or "").strip(), "warn")
+
     def generate_unique_order_no(self, conn):
         date_prefix = datetime.now(timezone.utc).strftime("%Y%m%d")
         for _ in range(16):
@@ -455,10 +487,12 @@ class CommerceService:
             if row is None:
                 return candidate
         raise RuntimeError("无法生成唯一订单号。")
+
     def compute_order_deadline_in_tx(self, conn, base_dt=None):
-        settings = self._panel.serialize_commerce_settings(conn)
+        settings = self.serialize_commerce_settings(conn)
         expires_dt = (base_dt or utc_now()) + timedelta(hours=int(settings["order_expiry_hours"]))
         return expires_dt.isoformat(timespec="seconds")
+
     def expire_pending_orders_in_tx(self, conn):
         now_text = utc_iso_now()
         conn.execute(
@@ -471,15 +505,17 @@ class CommerceService:
             """,
             (now_text, now_text),
         )
+
     def expire_pending_orders(self):
         def operation(conn):
-            self._panel.expire_pending_orders_in_tx(conn)
+            self.expire_pending_orders_in_tx(conn)
 
-        self._panel.apply_state_update(operation)
+        self.repository.apply_state_update(operation)
+
     def create_order(self, customer_id, plan_id, kind="new_purchase", service_subscription_id=None):
         def operation(conn):
             nonlocal service_subscription_id
-            self._panel.expire_pending_orders_in_tx(conn)
+            self.expire_pending_orders_in_tx(conn)
             customer = conn.execute(
                 "SELECT id, email, status FROM customers WHERE id = ? LIMIT 1",
                 (customer_id,),
@@ -508,7 +544,9 @@ class CommerceService:
             if kind_text == "renewal":
                 if service_subscription_id is None:
                     raise ValidationError("续费订单缺少服务实例。")
-                service_row = self._panel.get_service_subscription_row_in_tx(conn, service_subscription_id, customer_id=customer_id)
+                service_row = self.get_service_subscription_row_in_tx(
+                    conn, service_subscription_id, customer_id=customer_id
+                )
                 if service_row is None:
                     raise ValidationError("服务实例不存在。")
                 if int(service_row["plan_id"]) != int(plan["id"]):
@@ -531,7 +569,7 @@ class CommerceService:
                 service_subscription_id = None
 
             now_text = utc_iso_now()
-            order_no = self._panel.generate_unique_order_no(conn)
+            order_no = self.generate_unique_order_no(conn)
             conn.execute(
                 """
                 INSERT INTO orders (
@@ -552,14 +590,15 @@ class CommerceService:
                     plan["currency"],
                     plan["duration_days"],
                     plan["traffic_limit_bytes"],
-                    self._panel.compute_order_deadline_in_tx(conn),
+                    self.compute_order_deadline_in_tx(conn),
                     now_text,
                     now_text,
                 ),
             )
             return order_no
 
-        return self._panel.apply_state_update(operation)
+        return self.repository.apply_state_update(operation)
+
     def payment_proof_extension_from_bytes(self, payload):
         if payload.startswith(b"\x89PNG\r\n\x1a\n"):
             return "png"
@@ -568,13 +607,14 @@ class CommerceService:
         if payload.startswith(b"RIFF") and payload[8:12] == b"WEBP":
             return "webp"
         return ""
+
     def save_payment_proof_file(self, order_no, file_storage):
         content = file_storage.read()
         if not content:
             raise ValidationError("请上传支付截图。")
         if len(content) > PAYMENT_PROOF_MAX_BYTES:
             raise ValidationError(f"支付截图不能超过 {human_bytes(PAYMENT_PROOF_MAX_BYTES)}。")
-        extension = self._panel.payment_proof_extension_from_bytes(content)
+        extension = self.payment_proof_extension_from_bytes(content)
         if extension not in {"png", "jpg", "webp"}:
             raise ValidationError("支付截图只支持 PNG、JPG、WEBP。")
         target_dir = PAYMENT_PROOFS_DIR / str(order_no)
@@ -584,14 +624,15 @@ class CommerceService:
         absolute_path = PAYMENT_PROOFS_DIR.parent / relative_path
         absolute_path.write_bytes(content)
         return relative_path.as_posix()
+
     def submit_order_payment_submission(self, customer_id, order_no, file_storage, payer_note):
         note = str(payer_note or "").strip()
         if len(note) > 300:
             raise ValidationError("付款备注不能超过 300 个字符。")
-        relative_path = self._panel.save_payment_proof_file(order_no, file_storage)
+        relative_path = self.save_payment_proof_file(order_no, file_storage)
 
         def operation(conn):
-            self._panel.expire_pending_orders_in_tx(conn)
+            self.expire_pending_orders_in_tx(conn)
             order = conn.execute(
                 """
                 SELECT id, order_no, customer_id, status
@@ -624,15 +665,16 @@ class CommerceService:
             )
 
         try:
-            self._panel.apply_state_update(operation)
+            self.repository.apply_state_update(operation)
         except Exception:
             (PAYMENT_PROOFS_DIR.parent / relative_path).unlink(missing_ok=True)
             raise
+
     def serialize_order_row(self, row):
         item = dict(row)
         latest_submission_id = item.get("latest_submission_id")
-        item["status_label"] = self._panel.order_status_label(item.get("status"))
-        item["status_tone"] = self._panel.order_status_tone(item.get("status"))
+        item["status_label"] = self.order_status_label(item.get("status"))
+        item["status_tone"] = self.order_status_tone(item.get("status"))
         item["price_display"] = f"¥{int(item.get('price_fen_snapshot') or 0) / 100:.2f}"
         item["traffic_limit_display"] = human_bytes(item.get("traffic_limit_bytes_snapshot") or 0)
         item["expires_at_display"] = format_display_time(item.get("expires_at")) if item.get("expires_at") else "暂无"
@@ -654,6 +696,7 @@ class CommerceService:
             format_display_time(item.get("proof_reviewed_at")) if item.get("proof_reviewed_at") else "暂无"
         )
         return item
+
     def get_orders_base_query(self):
         return """
             SELECT
@@ -700,23 +743,25 @@ class CommerceService:
                     LIMIT 1
                 )
         """
+
     def query_customer_orders(self, customer_id):
-        self._panel.expire_pending_orders()
-        with self._panel.connect() as conn:
+        self.expire_pending_orders()
+        with self.repository.connect() as conn:
             rows = conn.execute(
-                self._panel.get_orders_base_query()
+                self.get_orders_base_query()
                 + """
                 WHERE o.customer_id = ?
                 ORDER BY o.id DESC
                 """,
                 (customer_id,),
             ).fetchall()
-        return [self._panel.serialize_order_row(row) for row in rows]
+        return [self.serialize_order_row(row) for row in rows]
+
     def get_customer_order(self, customer_id, order_no):
-        self._panel.expire_pending_orders()
-        with self._panel.connect() as conn:
+        self.expire_pending_orders()
+        with self.repository.connect() as conn:
             row = conn.execute(
-                self._panel.get_orders_base_query()
+                self.get_orders_base_query()
                 + """
                 WHERE o.customer_id = ? AND o.order_no = ?
                 LIMIT 1
@@ -725,23 +770,25 @@ class CommerceService:
             ).fetchone()
         if row is None:
             return None
-        return self._panel.serialize_order_row(row)
+        return self.serialize_order_row(row)
+
     def query_admin_orders(self, status_filter=""):
-        self._panel.expire_pending_orders()
-        with self._panel.connect() as conn:
-            sql = self._panel.get_orders_base_query()
+        self.expire_pending_orders()
+        with self.repository.connect() as conn:
+            sql = self.get_orders_base_query()
             params = []
             if status_filter:
                 sql += " WHERE o.status = ?"
                 params.append(status_filter)
             sql += " ORDER BY o.id DESC LIMIT 100"
             rows = conn.execute(sql, params).fetchall()
-        return [self._panel.serialize_order_row(row) for row in rows]
+        return [self.serialize_order_row(row) for row in rows]
+
     def get_admin_order(self, order_id):
-        self._panel.expire_pending_orders()
-        with self._panel.connect() as conn:
+        self.expire_pending_orders()
+        with self.repository.connect() as conn:
             row = conn.execute(
-                self._panel.get_orders_base_query()
+                self.get_orders_base_query()
                 + """
                 WHERE o.id = ?
                 LIMIT 1
@@ -750,9 +797,10 @@ class CommerceService:
             ).fetchone()
         if row is None:
             return None
-        return self._panel.serialize_order_row(row)
+        return self.serialize_order_row(row)
+
     def get_payment_submission_record(self, submission_id):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             row = conn.execute(
                 """
                 SELECT
@@ -768,9 +816,10 @@ class CommerceService:
                 (submission_id,),
             ).fetchone()
         return dict(row) if row is not None else None
+
     def query_commerce_overview(self):
-        self._panel.expire_pending_orders()
-        with self._panel.connect() as conn:
+        self.expire_pending_orders()
+        with self.repository.connect() as conn:
             customer_count = int(conn.execute("SELECT COUNT(*) FROM customers").fetchone()[0])
             enabled_plan_count = int(conn.execute("SELECT COUNT(*) FROM plans WHERE enabled = 1").fetchone()[0])
             service_count = int(conn.execute("SELECT COUNT(*) FROM service_subscriptions").fetchone()[0])
@@ -783,6 +832,7 @@ class CommerceService:
             "service_count": service_count,
             "pending_review_count": pending_review_count,
         }
+
     def get_service_subscription_row_in_tx(self, conn, service_subscription_id, customer_id=None):
         today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
         sql = """
@@ -826,7 +876,9 @@ class CommerceService:
         if row is None:
             return None
         item = dict(row)
-        item["traffic_usage_bytes"] = int(item.get("total_bytes_sent") or 0) + int(item.get("total_bytes_received") or 0)
+        item["traffic_usage_bytes"] = int(item.get("total_bytes_sent") or 0) + int(
+            item.get("total_bytes_received") or 0
+        )
         status = status_payload(
             bool(item.get("enabled")),
             item.get("expires_at"),
@@ -843,16 +895,19 @@ class CommerceService:
         item["traffic_used_display"] = human_bytes(item["traffic_usage_bytes"])
         item["last_seen_display"] = format_display_time(item.get("last_seen")) if item.get("last_seen") else "暂无"
         return item
+
     def query_customer_service_subscriptions(self, customer_id):
-        with self._panel.connect() as conn:
+        with self.repository.connect() as conn:
             rows = conn.execute(
                 "SELECT id FROM service_subscriptions WHERE customer_id = ? ORDER BY id DESC",
                 (customer_id,),
             ).fetchall()
-            return [self._panel.get_service_subscription_row_in_tx(conn, row["id"], customer_id=customer_id) for row in rows]
+            return [self.get_service_subscription_row_in_tx(conn, row["id"], customer_id=customer_id) for row in rows]
+
     def get_customer_service_subscription(self, customer_id, service_subscription_id):
-        with self._panel.connect() as conn:
-            return self._panel.get_service_subscription_row_in_tx(conn, service_subscription_id, customer_id=customer_id)
+        with self.repository.connect() as conn:
+            return self.get_service_subscription_row_in_tx(conn, service_subscription_id, customer_id=customer_id)
+
     def allocate_auto_port_in_tx(self, conn):
         if COMMERCE_AUTO_PORT_START is None or COMMERCE_AUTO_PORT_END is None:
             raise ValidationError("商业化自动分配端口范围未配置。")
@@ -870,13 +925,16 @@ class CommerceService:
             if listen_port not in used:
                 return listen_port
         raise ValidationError("自动分配端口范围已耗尽，请扩容可售端口区间。")
+
     def compute_service_expiry(self, duration_days):
         return (utc_now() + timedelta(days=int(duration_days))).isoformat(timespec="seconds")
+
     def build_service_note(self, customer_email, plan_name):
         base = f"{plan_name} / {customer_email}"
         if len(base) <= 200:
             return base
         return base[:200]
+
     def mark_latest_payment_submission_reviewed_in_tx(self, conn, order_id, review_status, review_note):
         latest_submission = conn.execute(
             """
@@ -898,6 +956,7 @@ class CommerceService:
             """,
             (review_status, str(review_note or "").strip(), utc_iso_now(), latest_submission["id"]),
         )
+
     def fulfill_order(self, order_id, review_note=""):
         note_text = str(review_note or "").strip()
         if len(note_text) > 300:
@@ -907,151 +966,147 @@ class CommerceService:
             # Acquire the same cross-process lock before opening the SQLite
             # write transaction. The resident AI manager follows this order as
             # well, avoiding a DB-lock/file-lock inversion during a fulfilment.
-            with exclusive_file_lock(self._panel._ai_manager_apply_lock_path()):
-                with self._panel.write_lock:
-                    self._panel.sync_traffic_state_locked()
-                    with self._panel.connect() as conn:
-                        conn.execute("BEGIN IMMEDIATE")
-                        try:
-                            self._panel.expire_pending_orders_in_tx(conn)
-                            order = conn.execute(
-                                """
-                                SELECT
-                                    o.*,
-                                    c.email AS customer_email
-                                FROM orders o
-                                JOIN customers c ON c.id = o.customer_id
-                                WHERE o.id = ?
-                                LIMIT 1
-                                """,
-                                (order_id,),
-                            ).fetchone()
-                            if order is None:
-                                raise ValidationError("订单不存在。")
-                            if order["status"] != "payment_submitted":
-                                raise ValidationError("当前订单状态不允许审核开通。")
+            with self.renderer.apply_lock(), self.write_lock:
+                self.traffic.sync_traffic_state_locked()
+                with self.repository.connect() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        self.expire_pending_orders_in_tx(conn)
+                        order = conn.execute(
+                            """
+                            SELECT
+                                o.*,
+                                c.email AS customer_email
+                            FROM orders o
+                            JOIN customers c ON c.id = o.customer_id
+                            WHERE o.id = ?
+                            LIMIT 1
+                            """,
+                            (order_id,),
+                        ).fetchone()
+                        if order is None:
+                            raise ValidationError("订单不存在。")
+                        if order["status"] != "payment_submitted":
+                            raise ValidationError("当前订单状态不允许审核开通。")
 
-                            now_text = utc_iso_now()
-                            service_expires_at = self._panel.compute_service_expiry(order["duration_days_snapshot"])
-                            service_subscription_id = order["service_subscription_id"]
+                        now_text = utc_iso_now()
+                        service_expires_at = self.compute_service_expiry(order["duration_days_snapshot"])
+                        service_subscription_id = order["service_subscription_id"]
 
-                            if order["kind"] == "new_purchase":
-                                listen_port = self._panel.allocate_auto_port_in_tx(conn)
-                                conn.execute(
-                                    """
-                                    INSERT INTO ports (
-                                        listen_port, upstream_host, upstream_port,
-                                        tenant_token, subscription_token, tenant_username, tenant_password,
-                                        expires_at, traffic_limit_bytes, enabled, note,
-                                        customer_id, service_subscription_id, source_order_id,
-                                        created_at, updated_at
-                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?)
-                                    """,
-                                    (
-                                        listen_port,
-                                        DEFAULT_UPSTREAM_HOST,
-                                        DEFAULT_UPSTREAM_PORT,
-                                        self._panel.generate_unique_port_token(conn, "tenant_token"),
-                                        self._panel.generate_unique_port_token(conn, "subscription_token"),
-                                        self._panel.generate_unique_tenant_username(conn),
-                                        generate_tenant_password(),
-                                        service_expires_at,
-                                        order["traffic_limit_bytes_snapshot"],
-                                        self._panel.build_service_note(
-                                            order["customer_email"], order["plan_name_snapshot"]
-                                        ),
-                                        order["customer_id"],
-                                        order["id"],
-                                        now_text,
-                                        now_text,
-                                    ),
-                                )
-                                port_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                                conn.execute(
-                                    """
-                                    INSERT INTO service_subscriptions (
-                                        customer_id, plan_id, port_id, source_order_id, latest_order_id, created_at, updated_at
-                                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                                    """,
-                                    (
-                                        order["customer_id"],
-                                        order["plan_id"],
-                                        port_id,
-                                        order["id"],
-                                        order["id"],
-                                        now_text,
-                                        now_text,
-                                    ),
-                                )
-                                service_subscription_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                                conn.execute(
-                                    """
-                                    UPDATE ports
-                                    SET service_subscription_id = ?
-                                    WHERE id = ?
-                                    """,
-                                    (service_subscription_id, port_id),
-                                )
-                            else:
-                                service_row = self._panel.get_service_subscription_row_in_tx(
-                                    conn,
-                                    order["service_subscription_id"],
-                                    customer_id=order["customer_id"],
-                                )
-                                if service_row is None or service_row.get("port_id") is None:
-                                    raise ValidationError("续费目标服务不存在。")
-                                port_id = int(service_row["port_id"])
-                                conn.execute(
-                                    """
-                                    UPDATE ports
-                                    SET expires_at = ?, traffic_limit_bytes = ?, enabled = 1, updated_at = ?
-                                    WHERE id = ?
-                                    """,
-                                    (
-                                        service_expires_at,
-                                        order["traffic_limit_bytes_snapshot"],
-                                        now_text,
-                                        port_id,
-                                    ),
-                                )
-                                self._panel.reset_port_usage_in_tx(conn, service_row["listen_port"])
-                                conn.execute(
-                                    """
-                                    UPDATE service_subscriptions
-                                    SET latest_order_id = ?, plan_id = ?, updated_at = ?
-                                    WHERE id = ?
-                                    """,
-                                    (
-                                        order["id"],
-                                        order["plan_id"],
-                                        now_text,
-                                        order["service_subscription_id"],
-                                    ),
-                                )
-                                service_subscription_id = order["service_subscription_id"]
-
-                            self._panel.mark_latest_payment_submission_reviewed_in_tx(
-                                conn, order["id"], "approved", note_text
-                            )
+                        if order["kind"] == "new_purchase":
+                            listen_port = self.allocate_auto_port_in_tx(conn)
                             conn.execute(
                                 """
-                                UPDATE orders
-                                SET status = 'fulfilled',
-                                    fulfilled_at = ?,
-                                    rejection_reason = '',
-                                    service_subscription_id = ?,
-                                    updated_at = ?
+                                INSERT INTO ports (
+                                    listen_port, upstream_host, upstream_port,
+                                    tenant_token, subscription_token, tenant_username, tenant_password,
+                                    expires_at, traffic_limit_bytes, enabled, note,
+                                    customer_id, service_subscription_id, source_order_id,
+                                    created_at, updated_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, ?, ?)
+                                """,
+                                (
+                                    listen_port,
+                                    DEFAULT_UPSTREAM_HOST,
+                                    DEFAULT_UPSTREAM_PORT,
+                                    self.ports.generate_unique_port_token(conn, "tenant_token"),
+                                    self.ports.generate_unique_port_token(conn, "subscription_token"),
+                                    self.ports.generate_unique_tenant_username(conn),
+                                    generate_tenant_password(),
+                                    service_expires_at,
+                                    order["traffic_limit_bytes_snapshot"],
+                                    self.build_service_note(order["customer_email"], order["plan_name_snapshot"]),
+                                    order["customer_id"],
+                                    order["id"],
+                                    now_text,
+                                    now_text,
+                                ),
+                            )
+                            port_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                            conn.execute(
+                                """
+                                INSERT INTO service_subscriptions (
+                                    customer_id, plan_id, port_id, source_order_id, latest_order_id, created_at, updated_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    order["customer_id"],
+                                    order["plan_id"],
+                                    port_id,
+                                    order["id"],
+                                    order["id"],
+                                    now_text,
+                                    now_text,
+                                ),
+                            )
+                            service_subscription_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                            conn.execute(
+                                """
+                                UPDATE ports
+                                SET service_subscription_id = ?
                                 WHERE id = ?
                                 """,
-                                (now_text, service_subscription_id, now_text, order["id"]),
+                                (service_subscription_id, port_id),
                             )
-                            self._panel.disable_auto_stopped_ports_in_tx(conn)
-                            self._panel._persist_and_reload_locked(conn, reload_xray=True)
-                        except Exception:
-                            conn.rollback()
-                            raise
+                        else:
+                            service_row = self.get_service_subscription_row_in_tx(
+                                conn,
+                                order["service_subscription_id"],
+                                customer_id=order["customer_id"],
+                            )
+                            if service_row is None or service_row.get("port_id") is None:
+                                raise ValidationError("续费目标服务不存在。")
+                            port_id = int(service_row["port_id"])
+                            conn.execute(
+                                """
+                                UPDATE ports
+                                SET expires_at = ?, traffic_limit_bytes = ?, enabled = 1, updated_at = ?
+                                WHERE id = ?
+                                """,
+                                (
+                                    service_expires_at,
+                                    order["traffic_limit_bytes_snapshot"],
+                                    now_text,
+                                    port_id,
+                                ),
+                            )
+                            self.traffic.reset_port_usage_in_tx(conn, service_row["listen_port"])
+                            conn.execute(
+                                """
+                                UPDATE service_subscriptions
+                                SET latest_order_id = ?, plan_id = ?, updated_at = ?
+                                WHERE id = ?
+                                """,
+                                (
+                                    order["id"],
+                                    order["plan_id"],
+                                    now_text,
+                                    order["service_subscription_id"],
+                                ),
+                            )
+                            service_subscription_id = order["service_subscription_id"]
+
+                        self.mark_latest_payment_submission_reviewed_in_tx(conn, order["id"], "approved", note_text)
+                        conn.execute(
+                            """
+                            UPDATE orders
+                            SET status = 'fulfilled',
+                                fulfilled_at = ?,
+                                rejection_reason = '',
+                                service_subscription_id = ?,
+                                updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (now_text, service_subscription_id, now_text, order["id"]),
+                        )
+                        self.renderer.disable_auto_stopped_ports_in_tx(conn)
+                        self.renderer.persist_and_reload_locked(conn, reload_xray=True)
+                    except Exception:
+                        conn.rollback()
+                        raise
         except LockBusyError as exc:
-            self._panel._raise_apply_lock_busy(exc)
+            self.renderer.raise_apply_lock_busy(exc)
+
     def reject_order(self, order_id, review_note=""):
         note_text = str(review_note or "").strip()
         if not note_text:
@@ -1060,7 +1115,7 @@ class CommerceService:
             raise ValidationError("驳回原因不能超过 300 个字符。")
 
         def operation(conn):
-            self._panel.expire_pending_orders_in_tx(conn)
+            self.expire_pending_orders_in_tx(conn)
             order = conn.execute(
                 "SELECT id, status FROM orders WHERE id = ? LIMIT 1",
                 (order_id,),
@@ -1069,7 +1124,7 @@ class CommerceService:
                 raise ValidationError("订单不存在。")
             if order["status"] != "payment_submitted":
                 raise ValidationError("当前订单状态不允许驳回。")
-            self._panel.mark_latest_payment_submission_reviewed_in_tx(conn, order["id"], "rejected", note_text)
+            self.mark_latest_payment_submission_reviewed_in_tx(conn, order["id"], "rejected", note_text)
             conn.execute(
                 """
                 UPDATE orders
@@ -1079,14 +1134,15 @@ class CommerceService:
                 (note_text, utc_iso_now(), order["id"]),
             )
 
-        self._panel.apply_state_update(operation)
+        self.repository.apply_state_update(operation)
+
     def cancel_order(self, order_id, review_note=""):
         note_text = str(review_note or "").strip()
         if len(note_text) > 300:
             raise ValidationError("取消备注不能超过 300 个字符。")
 
         def operation(conn):
-            self._panel.expire_pending_orders_in_tx(conn)
+            self.expire_pending_orders_in_tx(conn)
             order = conn.execute(
                 "SELECT id, status FROM orders WHERE id = ? LIMIT 1",
                 (order_id,),
@@ -1104,4 +1160,4 @@ class CommerceService:
                 (utc_iso_now(), note_text, utc_iso_now(), order["id"]),
             )
 
-        self._panel.apply_state_update(operation)
+        self.repository.apply_state_update(operation)
