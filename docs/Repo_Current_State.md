@@ -4,7 +4,7 @@ Last verified: 2026-09-08 @ working tree
 
 ## Current Focus
 
-- AI Routing 第一阶段 Python 拆分、本地验证和最终代码审查已完成，已提交到本地 feature branch，等待发布确认。
+- AI Routing 第一阶段 Python 拆分已合并到 `main`，并已在本机 Docker Compose 默认栈部署。
 
 ## Implemented
 
@@ -15,6 +15,7 @@ Last verified: 2026-09-08 @ working tree
 - 已移除未使用的编排清单和专属部署文档；备份 allowlist 与文档导航仅保留 Compose 入口。
 - 强制回退报告不再假设上游 host/port；未管理数据面报告为 `unmanaged`，不执行不存在的重启。
 - AI 路由实现已拆分到 `app/xray/ai_routing/`：`runner.py` 负责 CLI/定时任务，`manager.py` 负责编排，其余模块分别负责观测、分类、候选、选择、SQLite 仓储和产物；旧 `app/xray/ai_domain_manager.py` 保留为兼容 facade，并完整保留历史 helper 导出。
+- 本机默认控制面和数据库备份服务已按 `62e52a8` 重建并启动；面板 `/healthz` 返回 `ok=true`，控制面容器为 `healthy`。Xray profile 当前未启用。
 
 ## In Progress
 
@@ -25,7 +26,7 @@ Last verified: 2026-09-08 @ working tree
 - 全量 `pytest -q` 通过：241 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
 - 新增 `app/xray/ai_routing/` 已通过 Ruff、Black、`py_compile`、CLI `--help`、旧入口兼容 CLI、PlantUML 本地渲染和 Compose 配置检查。
 - `codex review --uncommitted` 已完成；review 发现的旧入口 helper 导出问题已修复并复跑聚焦/全量测试。review sandbox 自带的全量测试受 socket 权限限制，但当前工作区直接执行结果为上述 `241 passed、1 skipped`。
-- 当前控制面的 `xray-routing-panel` 已重建并健康运行，`/healthz` 返回 `ok=true`；本次未启动 Compose 的 Xray profile。
+- 本机部署使用了 `docker compose up -d --build`；仓库文档引用的 CPU-aware 构建脚本在本机不存在，因此未使用该脚本。
 
 ## Constraints
 
@@ -41,4 +42,4 @@ Last verified: 2026-09-08 @ working tree
 
 ## Next
 
-- 当前实现和验证已完成；如需发布，下一步是推送 feature branch 并按仓库流程创建 PR。当前未自动推送。
+- None
