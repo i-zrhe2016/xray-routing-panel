@@ -3,7 +3,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.xray.ai_domain_manager import ensure_ai_domain_schema
+from app.xray.ai_routing.repository import ensure_ai_domain_schema
 from components.xray_ops.ai_domains import build_ai_domain_analysis, codex_context
 from components.xray_ops.report_contract import _validate_ai_domain_analysis
 

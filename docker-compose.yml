@@ -235,7 +235,7 @@ services:
     # The default bridge network cannot reach the host's Tailscale routes.
     network_mode: host
     working_dir: /workspace
-    command: ["python3", "-m", "app.xray.ai_domain_manager"]
+    command: ["python3", "-m", "app.xray.ai_routing.runner"]
     env_file:
       - ./app/xray/.env
     environment:

@@ -148,7 +148,7 @@ curl -s -u admin:secret -X POST http://redacted-ip-007:18080/api/ai-node/restart
 手动跑一轮 AI 域名分析：
 
 ```bash
-docker compose --profile xray run --rm xray-ai-domain-manager python -m app.xray.ai_domain_manager --once
+docker compose --profile xray run --rm xray-ai-domain-manager python -m app.xray.ai_routing.runner --once
 ```
 
 手动跑一轮数据库备份和上传链路：

@@ -25,6 +25,16 @@ class _FakeHttpResponse:
 
 
 class AiDomainManagerTest(unittest.TestCase):
+    def test_legacy_facade_exports_split_classifier_helpers(self):
+        for name in (
+            "build_codex_command",
+            "extract_output_text",
+            "matches_domain_suffixes",
+            "sync_codex_home",
+            "validate_classification_results",
+        ):
+            self.assertTrue(callable(getattr(ai_domain_manager, name, None)), name)
+
     @mock.patch.object(ai_domain_manager.subprocess, "run")
     def test_rerender_config_passes_panel_ports_file_next_to_config(self, mocked_run):
         mocked_run.return_value = mock.Mock(returncode=0, stderr="", stdout="")

@@ -96,10 +96,10 @@ AI 上游即 AI 节点的公网入口地址。常见配置方式有两种：
 如果自动模式下所有 AI 上游都不可达，或人工固定的目标不可达：
 
 - 不再下发 `ai_proxy` 动态路由
-- 删除 `dynamic-routing.json`（`ai_domain_manager.py:1675`）
+- 删除 `dynamic-routing.json`（`app/xray/ai_routing/manager.py`）
 - 已命中的 AI 域名会回退到主链路流量（数据面 freedom 直出）
 - 自动模式报表中的 `route_status` 会标记为 `fallback_to_primary`；人工模式标记为 `manual_target_unreachable`
-- 回退判断由 `should_fallback_to_primary_route()`（`ai_domain_manager.py:1183`）完成
+- 回退判断由 `app/xray/ai_routing/selector.py` 中的 `should_fallback_to_primary_route()` 完成
 - **此回退不涉及 DNS 切换**
 
 管理员也可以在控制台总览中主动执行“切到主 AI”“切到备用 AI”“恢复自动探测”或“AI 全部直出”。
@@ -163,7 +163,7 @@ Google 搜索层直接抓取搜索结果页，不依赖 Google Search API；分�
 手动跑一轮 AI 域名分析：
 
 ```bash
-docker compose --profile xray run --rm xray-ai-domain-manager python -m app.xray.ai_domain_manager --once
+docker compose --profile xray run --rm xray-ai-domain-manager python -m app.xray.ai_routing.runner --once
 ```
 
 查看 AI 管理器日志：
@@ -184,7 +184,10 @@ sed -n '1,220p' app/xray/reports/hourly-domains/latest.json
 `app/xray/` 是 AI 路由和 Xray 配置子系统的代码目录，文档统一维护在本目录。常用入口如下：
 
 - `render_config.py`：渲染 `config.json`、`client-test.json` 和分享链接
-- `ai_domain_manager.py`：域名分类、动态路由、小时报表
+- `ai_routing/runner.py`：定时任务和 CLI 入口
+- `ai_routing/manager.py`：一次运行的编排
+- `ai_routing/observations.py`、`classifier.py`、`candidates.py`、`selector.py`、`repository.py`、`artifact.py`：按职责处理观测、分类、候选、选择、持久化和产物
+- `ai_domain_manager.py`：兼容旧导入的 facade，不再承载实现
 - `google_search_mcp.py`：辅助归类用 MCP server
 - `runtime/`：渲染产物和运行时缓存
 - `reports/`：小时域名报告

@@ -13,7 +13,7 @@ AI_PROXY_OUTBOUND_TEMPLATE_PATH = BASE_DIR / "ai-proxy-outbound.json"
 AI_PROXY_OUTBOUND_EXAMPLE_PATH = ASSETS_DIR / "ai-proxy-outbound.example.json"
 GENERATE_SECRETS_SCRIPT = BASE_DIR / "generate-secrets.sh"
 DEFAULT_RENDER_MODULE = "app.xray.render_config"
-DEFAULT_AI_DOMAIN_MANAGER_MODULE = "app.xray.ai_domain_manager"
+DEFAULT_AI_DOMAIN_MANAGER_MODULE = "app.xray.ai_routing.runner"
 DEFAULT_CLIENT_CONFIG_PATH = RUNTIME_DIR / "client-test.json"
 
 REQUIRED_ENV_KEYS = [

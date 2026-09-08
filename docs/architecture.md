@@ -72,7 +72,8 @@
 
 ### AI 路由子系统
 
-- 入口代码：`app/xray/ai_domain_manager.py`
+- 入口代码：`app/xray/ai_routing/runner.py`；编排集中在 `app/xray/ai_routing/manager.py`
+- 按职责拆分为观测、分类、候选探测、选择、数据库仓储和产物生成模块；旧的 `app/xray/ai_domain_manager.py` 仅保留兼容导出
 - 每小时通过普通数据面 SSH 增量读取 `access.log`，统计最近一小时域名窗口；本地模式读取本机日志
 - 结合内建规则、Codex 或 OpenAI 兼容接口做域名分类
 - 探测 `nat.qq.pw:27166` 和 `redacted-ip-004:27166` 两个 AI 候选

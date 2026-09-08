@@ -17,7 +17,9 @@ from ..helpers import (
     utc_iso_now,
 )
 from ..observability.logging import emit_business_event
-from ..xray.ai_domain_manager import LOCK_BUSY_EXIT_CODE, build_ai_upstream_candidates, ensure_ai_domain_schema
+from ..xray.ai_routing.candidates import build_ai_upstream_candidates
+from ..xray.ai_routing.manager import LOCK_BUSY_EXIT_CODE
+from ..xray.ai_routing.repository import ensure_ai_domain_schema
 from ..xray.envfile import load_env_file
 from ..xray.operation_lock import LockBusyError, exclusive_file_lock
 
@@ -196,7 +198,7 @@ class AiRoutingService:
     def _trigger_ai_domain_manager(self, manual_mode=None):
         run_options = {}
         if AI_DOMAIN_MANAGER_EXECUTION_MODE == "local":
-            command = [sys.executable, "-m", "app.xray.ai_domain_manager", "--once"]
+            command = [sys.executable, "-m", "app.xray.ai_routing.runner", "--once"]
             package_parent = Path(__file__).resolve().parents[2]
             if not (package_parent / "app").is_dir():
                 package_parent = Path(__file__).resolve().parents[1]
@@ -210,7 +212,7 @@ class AiRoutingService:
                 AI_DOMAIN_MANAGER_CONTAINER_NAME,
                 "python3",
                 "-m",
-                "app.xray.ai_domain_manager",
+                "app.xray.ai_routing.runner",
                 "--once",
         ]
         if manual_mode is not None:

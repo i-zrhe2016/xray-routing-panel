@@ -12,24 +12,36 @@ skinparam responseMessageBelowArrow true
 title Hourly AI Domain Analysis and Routing
 
 participant "DMIT Normal Xray" as dmit
-participant "xray-ai-domain-manager\n(interval=3600s)" as manager
+participant "runner.py\n(interval=3600s)" as runner
+participant "manager.py\n(orchestration)" as manager
+participant "observations.py" as observations
+participant "classifier.py" as classifier
 database "panel.db\nai_domains + observations" as db
+participant "candidates.py + selector.py" as selector
+participant "artifact.py" as artifact
 participant "dynamic-routing.json" as rules
 participant "Selected AI upstream" as ai
 
 == Every hour ==
+runner -> manager : Run one analysis/apply cycle
 manager -> dmit : Read access.log delta over SSH
-dmit --> manager : accepted destination records
-manager -> manager : Parse and classify each domain
+dmit --> observations : accepted destination records
+observations --> manager : domain observations
+manager -> classifier : Classify pending domains
+classifier --> manager : domain decisions
+manager -> selector : Probe and select AI candidate
+selector --> manager : primary / backup / fallback
 
 loop each observed domain
   alt classification = ai
     manager -> db : Upsert AI domain and hourly hit window
-    manager -> rules : Include domain -> ai_proxy
+    manager -> artifact : Build routing fragment and report
+    artifact -> rules : Write domain -> ai_proxy
     rules --> dmit : Reload generated routing fragment
     dmit -> ai : Relay AI domain via VLESS + REALITY
   else classification != ai or still unknown
-    manager -> rules : Omit domain from AI rules
+    manager -> artifact : Omit domain from routing fragment
+    artifact -> rules : Write artifact without domain
     dmit -> dmit : Use default freedom outbound
   end
 end
