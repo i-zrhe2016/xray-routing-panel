@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
 WRAPPER = ROOT / "scripts" / "render_config.py"
 
@@ -70,6 +69,28 @@ class RenderConfigWrapperTest(unittest.TestCase):
     def test_ai_domain_manager_wrapper_exposes_cli(self):
         completed = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "ai_domain_manager.py"), "--help"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertIn("Classify Xray destination domains", completed.stdout)
+
+    def test_canonical_ai_domain_manager_module_exposes_cli(self):
+        completed = subprocess.run(
+            [sys.executable, "-m", "app.xray.ai_routing.runner", "--help"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertIn("Classify Xray destination domains", completed.stdout)
+
+    def test_legacy_ai_domain_manager_module_forwards_to_cli(self):
+        completed = subprocess.run(
+            [sys.executable, "-m", "app.xray.ai_domain_manager", "--help"],
             cwd=str(ROOT),
             capture_output=True,
             text=True,
