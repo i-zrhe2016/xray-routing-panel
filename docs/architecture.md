@@ -33,14 +33,14 @@
 
 ### 控制面
 
-- 入口代码：`app/panel.py`（进程入口）→ `app/web/`（`create_app` 工厂 + 按域视图模块）、`app/state/`（`PanelState` facade 组合域 service）
+- 入口代码：`app/panel.py`（进程入口）→ `app/bootstrap.py`（Application composition root）→ `app/web/`（接收 Application 的 `create_app` 工厂 + 按域视图模块）；`app/state/` 保留 `PanelState` 兼容 facade
 - `PanelState` 持有两个受管节点控制器：`data_plane`（普通数据面）和 `ai_node`（AI 节点），均复用 `NodeController`（`app/xray/node/`）；旧的 `app/xray/node_control.py` 仅作为兼容 facade
-- `PanelState` 是组合根和兼容 facade：`ports`、`traffic`、`probes`、`dns_failover`、`ai_routing`、`commerce`、`diagnostics` 通过显式的 `repository`、`renderer`、`node_controller`、锁及兄弟 service 依赖连接；service 不保存 `PanelState` 回指，旧的扁平方法由具体 delegate 保留，不再依赖通用属性代理
+- `Application` 是由 `app/bootstrap.py` 返回的应用 facade；`PanelState` 只保留兼容 facade：`ports`、`traffic`、`probes`、`dns_failover`、`ai_routing`、`commerce`、`diagnostics` 通过显式的 `repository`、`renderer`、`node_controller`、锁及兄弟 service 依赖连接；service 不保存 `PanelState` 回指，旧的扁平方法由具体 delegate 保留，不再依赖通用属性代理
 - SQLite 连接、事务和 `app_state` 读写位于 `app/storage/sqlite.py`，通用 `app_state` DDL 与 bootstrap 位于 `app/storage/schema.py`；端口、流量、探针、AI、DNS 和商业表由各自域 service 的幂等 schema hook 创建/迁移，再由 `ApplicationLifecycle` 按依赖顺序调用；域 service 直接依赖 `SQLiteDatabase`
 - Xray 配置变更通过 `app/xray/apply.py` 的 `XrayApplyService` 编排：数据库 mutation 后依次生成 panel ports/config、校验、同步、重载并在失败时回滚数据库、文件和节点状态；端口、流量和商业履约 service 显式依赖该 apply collaborator，商业履约通过公开的 caller-owned apply lock/transaction 接口接入，不触碰其私有实现
 - 多节点状态聚合和 Xray `statsquery` 解析分别位于 `app/xray/node/fleet.py` 与 `app/xray/stats.py`；runtime 调度位于 `app/runtime/`，生命周期负责 bootstrap 及 worker 启停，代码位于 `app/state/lifecycle.py`
 - AI domain manager 的本地/容器进程启动位于 `app/xray/ai_routing/launcher.py`；`app/state/ai_routing.py` 只依赖 runner，不直接执行系统进程
-- `PanelState` 只保留组合根和扁平兼容 facade；旧的 Core 协调器已删除，Web 入口直接调用 `ApplicationLifecycle` 和 runtime worker
+- `PanelState` 只保留扁平兼容 facade；旧的 Core 协调器已删除，Web 入口由 `app/panel.py` 注入 Application 后直接调用 `ApplicationLifecycle` 和 runtime worker
 - Flask 同时托管：管理后台 SPA（`/`）、订阅者门户 SPA（`/portal`）、公共/认证页（`/plans`、`/customer/*`）、租户订阅直达（`/tenant/<token>`）和探针/AI 仪表盘；前端发布资源位于 `app/static/{admin,portal,landing}`，Admin 源码与 Vite 配置位于 `frontend/`
 - 保存端口、租户、流量、AI 聚合，以及商业化数据（客户、套餐、订单、服务订阅、支付凭证）到 `data/panel.db`
 - 保存 DNS 故障切换状态和事件历史到 `data/panel.db`

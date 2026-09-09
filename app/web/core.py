@@ -1,17 +1,21 @@
 import atexit
+import importlib
 import logging
+import secrets
 import signal
+import sys
 import time
 from datetime import datetime
 
-from flask import Flask, Response, abort, cli as flask_cli, g, jsonify, redirect, request, session, url_for
+from flask import Flask, Response, abort, current_app, g, jsonify, redirect, request, session, url_for
+from flask import cli as flask_cli
 
 from ..auth import (
     auth_required_response,
     clear_customer_session,
     clear_tenant_session,
-    customer_auth_required_response,
     credentials_match,
+    customer_auth_required_response,
     ensure_csrf_token,
     extract_basic_credentials,
     is_customer_session_authenticated,
@@ -54,23 +58,34 @@ from ..observability.logging import (
     set_request_endpoint,
     slow_request_threshold_ms,
 )
-from ..state import PanelState
 from ..subscriptions import (
     build_clash_subscription_content,
     build_port_access_payload,
     build_v2ray_subscription_content,
     parse_xray_client_profile,
 )
-import secrets
 
-# Routes, before_request hooks and template filters are collected at import time
-# and applied by create_app(). This gives the module a real app factory while
-# every handler stays a plain module-level function, and — crucially — endpoint
-# names stay bare (the function name), so url_for(...) in templates and the
+# Routes, before_request hooks and template filters are collected when the
+# factory loads the view modules and then applied to each Flask app. Every
+# handler stays a plain module-level function, and — crucially — endpoint names
+# stay bare (the function name), so url_for(...) in templates and the
 # endpoint-name sets in the before_request guards keep working unchanged.
 _ROUTES = []
 _BEFORE_REQUEST = []
 _TEMPLATE_FILTERS = []
+
+_VIEW_MODULES = (
+    "admin_api",
+    "admin_views",
+    "client_errors",
+    "customer_api",
+    "customer_views",
+    "health",
+    "metrics",
+    "portal_views",
+    "subscription_views",
+    "tenant_views",
+)
 
 
 def route(rule, **options):
@@ -94,13 +109,56 @@ def template_filter(name):
     return decorator
 
 
-# Set by the package __init__ after the view modules are imported and the app is
-# built, so main() can run the WSGI server. Kept here (not in __init__) so the
-# whole startup surface lives in one module.
+# The compatibility reference is stable across factory calls. View modules can
+# keep their existing ``state.method(...)`` calls while requests resolve the
+# application from the Flask app that is currently serving them. This keeps the
+# migration seam narrow until the view call sites move to application services.
 app = None
 
 
-def create_app():
+class _ApplicationReference:
+    def __init__(self):
+        self._fallback = None
+
+    def bind(self, application):
+        self._fallback = application
+
+    def _resolve(self):
+        try:
+            return current_app.extensions["application"]
+        except RuntimeError:
+            if self._fallback is not None:
+                return self._fallback
+            raise RuntimeError("No application has been bound to the Web factory") from None
+
+    def __getattr__(self, name):
+        return getattr(self._resolve(), name)
+
+
+state = _ApplicationReference()
+
+
+def _load_view_modules(application):
+    state.bind(application)
+    for module_name in _VIEW_MODULES:
+        importlib.import_module(f"{__package__}.{module_name}")
+
+    # A view module may have been imported by a helper test before the factory
+    # was called. Rebind its legacy module-level name so every handler consumes
+    # the application supplied to this factory call.
+    for module_name in _VIEW_MODULES:
+        module = sys.modules.get(f"{__package__}.{module_name}")
+        if module is not None and "state" in vars(module):
+            module.state = state
+
+
+def create_app(application):
+    """Create the Flask consumer for a caller-provided application object."""
+
+    if application is None:
+        raise TypeError("create_app(application) requires an application object")
+
+    _load_view_modules(application)
     # import_name "app" so Flask resolves root_path to the app/ package dir,
     # making template_folder/static_folder point at app/templates and app/static
     # exactly as the former single-file app.web module did.
@@ -116,6 +174,7 @@ def create_app():
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=PANEL_PUBLIC_URL.startswith("https://"),
     )
+    flask_app.extensions["application"] = application
     werkzeug_logger = logging.getLogger("werkzeug")
     werkzeug_logger.disabled = True
     werkzeug_logger.propagate = False
@@ -129,10 +188,14 @@ def create_app():
     flask_app.teardown_request(observability_teardown_request)
     for name, filter_func in _TEMPLATE_FILTERS:
         flask_app.add_template_filter(filter_func, name)
+    global app
+    app = flask_app
+    package = sys.modules.get(__package__)
+    if package is not None:
+        package.app = flask_app
+        package.state = state
     return flask_app
 
-
-state = PanelState()
 
 _BUSINESS_EVENT_BY_ENDPOINT = {
     "login": "auth.admin.login",
