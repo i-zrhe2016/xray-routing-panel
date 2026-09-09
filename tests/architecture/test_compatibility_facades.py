@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.xray import ai_domain_manager, node_control
+from app.xray import ai_domain_manager
 from app.xray.ai_routing import artifact, manager, runner
 from app.xray.node import DockerBackend, LocalBackend, NodeController, SSHBackend, UnmanagedBackend
 
@@ -46,12 +46,41 @@ def test_panel_state_keeps_concrete_legacy_delegates_without_catch_all():
         application.__getattribute__("unsupported_legacy_attribute")
 
 
-def test_node_control_facade_reexports_canonical_node_symbols():
-    assert node_control.NodeController is NodeController
-    assert node_control.DockerBackend is DockerBackend
-    assert node_control.LocalBackend is LocalBackend
-    assert node_control.SSHBackend is SSHBackend
-    assert node_control.UnmanagedBackend is UnmanagedBackend
+def test_node_package_exposes_canonical_node_symbols():
+    from app.xray import node
+
+    assert node.NodeController is NodeController
+    assert node.DockerBackend is DockerBackend
+    assert node.LocalBackend is LocalBackend
+    assert node.SSHBackend is SSHBackend
+    assert node.UnmanagedBackend is UnmanagedBackend
+
+
+def test_node_control_legacy_module_is_removed():
+    repository_root = Path(__file__).resolve().parents[2]
+
+    assert not (repository_root / "app" / "xray" / "node_control.py").exists()
+
+
+def test_internal_code_does_not_import_removed_node_control_module():
+    from .test_import_boundaries import _find_forbidden_imports
+
+    repository_root = Path(__file__).resolve().parents[2]
+    violations = []
+    for source_root, package_name in (
+        (repository_root / "app", "app"),
+        (repository_root / "scripts", "scripts"),
+        (repository_root / "tests", "tests"),
+    ):
+        violations.extend(
+            _find_forbidden_imports(
+                source_root,
+                package_name,
+                ("app.xray.node_control",),
+            )
+        )
+
+    assert not violations, "\n".join(violations)
 
 
 def test_ai_domain_manager_facade_keeps_canonical_cli_and_helper_exports():

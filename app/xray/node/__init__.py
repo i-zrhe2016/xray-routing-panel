@@ -1,8 +1,8 @@
 """Backends for managed Xray nodes.
 
 ``NodeController`` is the stable orchestration facade.  Concrete transport
-and process details live in the backend modules and remain available through
-the legacy :mod:`app.xray.node_control` compatibility module.
+and process details live in the backend modules; callers should import all
+node types from this canonical package.
 """
 
 from .backend import DataPlaneConfig, NodeBackend, UnmanagedBackend

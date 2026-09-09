@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from app.xray.node_control import DataPlaneConfig, DataPlaneController
+from app.xray.node import DataPlaneConfig, DataPlaneController
 
 
 class PublicIpResolutionTest(unittest.TestCase):
