@@ -11,12 +11,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
-from app.xray.node_control import (
-    REMOTE_FILE_DELTA_SCRIPT,
-    DataPlaneConfig,
-    DataPlaneController,
-    build_temp_target_path,
-)
+from app.xray.node import DataPlaneConfig, DataPlaneController
+from app.xray.node.files import REMOTE_FILE_DELTA_SCRIPT, build_temp_target_path
 from app.xray.operation_lock import exclusive_file_lock
 
 
@@ -153,12 +149,14 @@ class NodeControlTest(unittest.TestCase):
             )
         )
 
-        with mock.patch(
-            "app.xray.node_control.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(["ssh"], 0.5),
+        with (
+            mock.patch(
+                "app.xray.node.backend.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["ssh"], 0.5),
+            ),
+            self.assertRaisesRegex(RuntimeError, "命令执行超时"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "命令执行超时"):
-                controller._run_remote(["true"], "数据面命令失败")
+            controller._run_remote(["true"], "数据面命令失败")
 
     def test_direct_ssh_ignores_identity_options_and_allows_password_auth(self):
         controller = DataPlaneController(
@@ -172,7 +170,7 @@ class NodeControlTest(unittest.TestCase):
         )
 
         completed = subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
-        with mock.patch("app.xray.node_control.subprocess.run", return_value=completed) as mocked_run:
+        with mock.patch("app.xray.node.backend.subprocess.run", return_value=completed) as mocked_run:
             controller._run_remote(["true"], "数据面命令失败")
 
         command = mocked_run.call_args.args[0]

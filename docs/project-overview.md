@@ -335,7 +335,7 @@ docker compose run --rm xray-routing-panel-db-backup \
 - [../app/dns_failover.py](../app/dns_failover.py): Cloudflare API 客户端与切换策略
 - [../app/xray/render_config.py](../app/xray/render_config.py): 渲染 Xray 服务端和客户端产物（普通数据面、AI 节点、控制面备用）
 - [../app/xray/node/](../app/xray/node/): `NodeController` / `NodeBackend`——按 SSH、Docker、本地进程分离节点管理、文件同步与探测，统一用于普通数据面和 AI 节点
-- [../app/xray/node_control.py](../app/xray/node_control.py): 旧导入路径兼容 facade，继续导出历史控制器名称
+- `app.xray.node_control` 旧导入路径已移除；节点控制器与 backend 类型统一从 [../app/xray/node/](../app/xray/node/) 导入
 - [../app/xray/ai_routing/runner.py](../app/xray/ai_routing/runner.py): AI 路由定时任务和 CLI 入口
 - [../app/xray/ai_routing/manager.py](../app/xray/ai_routing/manager.py): AI 路由单轮编排
 

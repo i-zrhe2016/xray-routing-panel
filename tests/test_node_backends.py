@@ -3,13 +3,13 @@ import unittest
 
 from app.xray.node import (
     DataPlaneConfig,
+    DataPlaneController,
     DockerBackend,
     LocalBackend,
     NodeController,
     SSHBackend,
     UnmanagedBackend,
 )
-from app.xray.node_control import DataPlaneController
 
 
 class NodeBackendSelectionTest(unittest.TestCase):
