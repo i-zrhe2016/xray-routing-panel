@@ -7,6 +7,7 @@ their routes and stores the same object in ``flask_app.extensions``.
 """
 
 from .core import (
+    application,
     before_request,
     create_app,
     handle_shutdown,
@@ -22,6 +23,7 @@ state = None
 
 __all__ = [
     "app",
+    "application",
     "before_request",
     "create_app",
     "handle_shutdown",

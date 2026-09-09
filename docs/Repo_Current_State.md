@@ -7,7 +7,7 @@ Last verified: 2026-09-09 @ working tree
 - AI Routing 第一阶段 Python 拆分与 NodeController 第二阶段均已合并到 `main`；本机默认控制面与数据库备份服务已按 `6c8eef3` 重建并通过健康检查，Xray profile 未启用。
 - PanelState 第三阶段依赖收缩已完成：它保留组合根/兼容 facade 角色，域 service 改为持有显式 repository、renderer、node controller、锁和兄弟 service 依赖。
 - 应用级 Core 协调器第四阶段已完成：SQLite 连接/状态存储和 schema bootstrap 位于 `app/storage/`，Xray apply 事务位于 `app/xray/apply.py`，节点 fleet helper、Xray stats reader、runtime workers 和 `ApplicationLifecycle` 均已从旧 Core 边界移出。
-- 第五阶段已开始：`app/bootstrap.py` 是控制面 composition root，`app/panel.py` 构造并注入 Application，Web factory 不再在 import-time 创建 PanelState；架构边界检查已加入 `tests/architecture/`。
+- 第五阶段已开始：`app/bootstrap.py` 是控制面 composition root，`app/panel.py` 构造并注入 Application，Web factory 不再在 import-time 创建 PanelState；架构边界检查和 Application 分域 API 已加入测试保护。
 
 ## Implemented
 
@@ -22,7 +22,9 @@ Last verified: 2026-09-09 @ working tree
 - `app/state/` 域 service 不再保存 `PanelState` back-reference；`PanelState` 的旧扁平调用面由具体 delegate 保留，已移除通用属性代理。
 - `app/storage/sqlite.py` 提供带共享写锁的 `SQLiteDatabase.connect()` 与显式 `transaction()`；`app/storage/schema.py` 只持有通用 `app_state` DDL，端口、流量、探针、AI、DNS 和商业表由各自 service 的幂等 schema hook 创建/迁移，并由生命周期在同一连接上按依赖顺序调用。
 - `app/bootstrap.py` 集中创建 `SQLiteDatabase`、`SchemaBootstrap`、NodeController、域 service、runtime worker 和 `ApplicationLifecycle`；`PanelState` 只保留兼容 facade 和显式组件图接收逻辑。
+- `Application` 的公开分域入口固定为 `ports`、`traffic`、`probes`、`nodes`、`ai_routing`、`dns_failover`、`commerce`、`diagnostics` 和 `lifecycle`；`NodesService` 负责数据面/AI 节点状态聚合、同步和重启，旧扁平节点方法委托到该服务。
 - `app/web/core.py` 的 `create_app(application)` 只消费调用方提供的 Application/State，将同一实例保存到 `flask_app.extensions["application"]`；路由模块在注入后注册，Web 不再负责业务对象构造。
+- Dashboard 与 health 的读取路径已开始使用 `application.<domain>.<method>()`；其余 view 继续通过旧扁平 delegate 迁移，避免一次性改动。
 - `tests/architecture/` 使用标准库 AST 检查 `xray/storage/runtime` 到 Web/State 的禁止依赖、Web 业务依赖构造，以及 canonical 包与兼容 facade 的方向；不依赖生产 singleton 或网络服务。
 - `app/xray/apply.py` 的 `XrayApplyService` 负责数据库变更后的 panel-ports/config render、校验、远端同步、主/备 Xray 重载、提交和失败回滚；`PortsService`、`TrafficService`、`CommerceService` 显式持有它作为 apply collaborator。
 - 商业履约通过 `XrayApplyService.apply_lock()` 与 `persist_and_reload_locked()` 接入已有事务，不再访问 apply service 的私有锁/回滚方法。
@@ -35,11 +37,11 @@ Last verified: 2026-09-09 @ working tree
 
 ## In Progress
 
-- 架构边界测试已落地；旧 view 的扁平 facade 调用仍在迁移期保留。
+- Application facade 公共 API 和 dashboard/health 的首批分域读取已落地；其余 view 的扁平 facade 调用仍在迁移期保留。
 
 ## Known Issues / Failing Checks
 
-- 全量 `.venv/bin/python -m pytest -q` 通过：280 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
+- 全量 `.venv/bin/python -m pytest -q` 通过：283 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
 - NodeController、fleet、stats 与 runtime 聚焦测试均通过；backend 选择覆盖 SSH、local、Docker、unmanaged 和旧控制器别名。
 - Phase 4 聚焦回归通过：生命周期、storage、组合、节点控制、DNS、商业和 unified entry 均通过；新增领域 schema hook、SQLite 共享写锁、runtime worker、node fleet、Xray stats 与 AI launcher 测试均通过 Ruff。修改后的 state/storage/web 文件通过 `py_compile` 和 `git diff --check`；`ruff check app/state` 仍报告既有的 `BLE001`、`SIM117` 等规则告警。
 - 本机部署使用了 `docker compose up -d --build`；仓库文档引用的 CPU-aware 构建脚本在本机不存在，因此未使用该脚本。
@@ -52,7 +54,7 @@ Last verified: 2026-09-09 @ working tree
 ## Architecture Snapshot
 
 - Flask 控制面由 `app/panel.py` 通过 `app/bootstrap.py` 组装 Application，再交给 `app/web/` 的 `create_app(application)`；`app/state/` 服务管理 SQLite，`app/xray/node/` 通过 `NodeController` 选择并编排本地、Docker、SSH 或 unmanaged backend，`node_control.py` 仅保留兼容导出。
-- `Application`/`PanelState` 只暴露共享组件和兼容 facade；各域 service 通过显式 collaborator 访问数据库、渲染、节点控制、锁和跨域能力，不再通过全局 facade 回溯依赖。领域 schema 初始化也由各 service 持有，`ApplicationLifecycle` 只负责调用顺序。
+- `Application` 暴露 `ports`、`traffic`、`probes`、`nodes`、`ai_routing`、`dns_failover`、`commerce`、`diagnostics` 和 `lifecycle`；各域 service 通过显式 collaborator 访问数据库、渲染、节点控制、锁和跨域能力，不再通过全局 facade 回溯依赖。领域 schema 初始化也由各 service 持有，`ApplicationLifecycle` 只负责调用顺序。
 - AI 管理器与面板通过运行时目录中的应用锁和待应用标记协作；启用外部 reloader 时由 watcher 负责 Xray 进程重载。
 - AI Routing 包的模块边界和数据流见 [AI 路由](ai-routing.md) 与 [小时分析流程图](diagrams/ai-hourly-analysis.svg)。
 - 报告由管理器写入共享 `app/xray/reports`，面板从同一卷读取；详细流程见 [AI 路由](ai-routing.md)。

@@ -11,7 +11,7 @@ def test_create_app_requires_an_application_object():
 
 
 def test_create_app_registers_routes_and_keeps_the_exact_application():
-    import app.web as web
+    web = importlib.import_module("app.web")
     from app.web import core
 
     application = object()
@@ -20,6 +20,7 @@ def test_create_app_registers_routes_and_keeps_the_exact_application():
     assert flask_app.extensions["application"] is application
     assert core.app is flask_app
     assert web.app is flask_app
+    assert web.application is core.application
     assert web.state is core.state
     assert web.health.state is core.state
     assert {"healthz", "index", "api_dashboard", "metrics"} <= set(flask_app.view_functions)
@@ -28,18 +29,25 @@ def test_create_app_registers_routes_and_keeps_the_exact_application():
 def test_create_app_resolves_state_for_the_current_flask_application():
     from app.web import create_app
 
-    class FakeApplication:
+    class FakeNodes:
         def __init__(self, data_plane_running):
             self._data_plane_running = data_plane_running
-
-        def dns_failover_status(self):
-            return {"enabled": False}
 
         def data_plane_running(self):
             return self._data_plane_running
 
         def ai_node_running(self):
             return False
+
+    class FakeDnsFailover:
+        @staticmethod
+        def dns_failover_status():
+            return {"enabled": False}
+
+    class FakeApplication:
+        def __init__(self, data_plane_running):
+            self.nodes = FakeNodes(data_plane_running)
+            self.dns_failover = FakeDnsFailover()
 
     first_application = FakeApplication(True)
     first_flask_app = create_app(first_application)

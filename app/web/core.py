@@ -109,10 +109,11 @@ def template_filter(name):
     return decorator
 
 
-# The compatibility reference is stable across factory calls. View modules can
-# keep their existing ``state.method(...)`` calls while requests resolve the
-# application from the Flask app that is currently serving them. This keeps the
-# migration seam narrow until the view call sites move to application services.
+# The application reference is stable across factory calls. New view code can
+# use ``application.domain.method(...)`` while legacy modules keep their
+# ``state.method(...)`` calls; both resolve the Flask app that is currently
+# serving the request. This keeps the migration seam narrow until all view call
+# sites move to application services.
 app = None
 
 
@@ -135,7 +136,9 @@ class _ApplicationReference:
         return getattr(self._resolve(), name)
 
 
-state = _ApplicationReference()
+application = _ApplicationReference()
+# ``state`` is the legacy name retained for views that have not migrated yet.
+state = application
 
 
 def _load_view_modules(application):
@@ -193,6 +196,7 @@ def create_app(application):
     package = sys.modules.get(__package__)
     if package is not None:
         package.app = flask_app
+        package.application = state
         package.state = state
     return flask_app
 
@@ -462,18 +466,18 @@ def build_subscription_snapshot(ports):
 
 
 def collect_dashboard_state(message="", level="info", ai_sync_error=""):
-    ports = state.query_ports()
-    summary = state.query_summary(ports)
+    ports = application.ports.query_ports()
+    summary = application.ports.query_summary(ports)
     subscription = build_subscription_snapshot(ports)
-    data_plane_status = state.data_plane_status()
-    ai_nodes_status = state.ai_nodes_status()
-    ai_node_status = state.ai_node_status(ai_nodes_status)
-    ai_routing_status = state.ai_routing_status(sync_error=ai_sync_error)
-    dns_failover_status = state.dns_failover_status()
-    commerce_summary = state.query_commerce_overview()
-    commerce_settings = state.get_commerce_settings()
-    commerce_plans = state.query_plans(public_only=False)
-    commerce_orders = state.query_admin_orders()
+    data_plane_status = application.nodes.data_plane_status()
+    ai_nodes_status = application.nodes.ai_nodes_status()
+    ai_node_status = application.nodes.ai_node_status(ai_nodes_status)
+    ai_routing_status = application.ai_routing.ai_routing_status(sync_error=ai_sync_error)
+    dns_failover_status = application.dns_failover.dns_failover_status()
+    commerce_summary = application.commerce.query_commerce_overview()
+    commerce_settings = application.commerce.get_commerce_settings()
+    commerce_plans = application.commerce.query_plans(public_only=False)
+    commerce_orders = application.commerce.query_admin_orders()
     nodes = [
         {
             "key": "data_plane",
@@ -505,7 +509,7 @@ def collect_dashboard_state(message="", level="info", ai_sync_error=""):
         "supports_restart": False,
     })
     traffic_routing = build_traffic_routing(data_plane_status, ai_node_status, ai_routing_status, dns_failover_status)
-    backup_xray_mode = state.backup_xray_mode() if hasattr(state, "backup_xray_mode") else "disabled"
+    backup_xray_mode = dns_failover_status.get("backup_xray_mode") or "disabled"
     return {
         "flash": {
             "message": message,
@@ -533,7 +537,7 @@ def collect_dashboard_state(message="", level="info", ai_sync_error=""):
             "nodes": nodes,
             "traffic_routing": traffic_routing,
             "backup_xray_mode": backup_xray_mode,
-            "ai_domain_stats": state.query_ai_domain_overview(sync_error=ai_sync_error),
+            "ai_domain_stats": application.ai_routing.query_ai_domain_overview(sync_error=ai_sync_error),
             "grafana_url": GRAFANA_PUBLIC_URL,
             "grafana_observability_uid": GRAFANA_OBSERVABILITY_UID,
         },
