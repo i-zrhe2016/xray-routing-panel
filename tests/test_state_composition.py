@@ -1,5 +1,7 @@
 import inspect
 
+import pytest
+
 
 def test_panel_state_wires_domains_with_explicit_dependencies():
     from app.state import PanelState
@@ -58,6 +60,24 @@ def test_bootstrap_builds_canonical_application_from_one_component_graph():
     assert application.maintenance_worker.stop_event is application.stop_event
     assert application.dns_failover_worker.stop_event is application.stop_event
     assert application.lifecycle.stop_event is application.stop_event
+    assert application.PUBLIC_COMPONENT_NAMES == (
+        "ports",
+        "traffic",
+        "probes",
+        "nodes",
+        "ai_routing",
+        "dns_failover",
+        "commerce",
+        "diagnostics",
+        "lifecycle",
+    )
+    assert application.nodes is components["nodes"]
+    assert application.nodes.data_plane is application.data_plane
+    assert application.nodes.ai_nodes is application.ai_nodes
+    assert callable(application.query_ports)
+    assert not hasattr(type(application), "__getattr__")
+    with pytest.raises(AttributeError):
+        application.__getattribute__("unsupported_legacy_attribute")
     assert "NodeController(" not in inspect.getsource(application.__class__.__mro__[1].__init__)
 
 

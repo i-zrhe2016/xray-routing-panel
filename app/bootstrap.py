@@ -59,6 +59,7 @@ def build_application_components():
     from .state.diagnostics import DiagnosticsService
     from .state.dns_failover import DnsFailoverService
     from .state.lifecycle import ApplicationLifecycle
+    from .state.nodes import NodesService
     from .state.ports import PortsService
     from .state.probes import ProbesService
     from .state.traffic import TrafficService
@@ -187,6 +188,11 @@ def build_application_components():
     else:
         ai_nodes = {}
     ai_node = next(iter(ai_nodes.values()), None)
+    nodes = NodesService(
+        data_plane=data_plane,
+        ai_nodes=ai_nodes,
+        ai_node=ai_node,
+    )
 
     dns_failover_manager = DnsFailoverManager(
         DnsFailoverConfig(
@@ -309,6 +315,7 @@ def build_application_components():
         "data_plane": data_plane,
         "ai_nodes": ai_nodes,
         "ai_node": ai_node,
+        "nodes": nodes,
         "dns_failover_manager": dns_failover_manager,
         "xray_stats": xray_stats,
         "xray_apply": xray_apply,
@@ -326,7 +333,24 @@ def build_application_components():
 
 
 class Application(PanelState):
-    """Canonical application facade returned by :func:`build_application`."""
+    """Canonical application facade returned by :func:`build_application`.
+
+    These domain services are the supported entry points for new callers.
+    Lower-level components remain exposed on the inherited facade only for
+    compatibility with existing workers, scripts and view migrations.
+    """
+
+    PUBLIC_COMPONENT_NAMES = (
+        "ports",
+        "traffic",
+        "probes",
+        "nodes",
+        "ai_routing",
+        "dns_failover",
+        "commerce",
+        "diagnostics",
+        "lifecycle",
+    )
 
 
 def build_application():

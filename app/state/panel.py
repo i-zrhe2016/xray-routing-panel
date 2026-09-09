@@ -6,21 +6,14 @@ from ..config import (
     XRAY_ENV_FILE_PATH,
 )
 from ..dns_failover import resolve_public_ip
-from ..errors import ValidationError
 from ..helpers import format_optional_display_time
 from ..xray.apply import XrayApplyService
-from ..xray.node.fleet import (
-    aggregate_node_status,
-    any_node_running,
-    node_statuses,
-    restart_node_or_raise,
-    sync_node_configs,
-)
 from .ai_routing import AiRoutingService
 from .commerce import CommerceService
 from .diagnostics import DiagnosticsService
 from .dns_failover import DnsFailoverService
 from .lifecycle import ApplicationLifecycle
+from .nodes import NodesService
 from .ports import PortsService
 from .probes import ProbesService
 from .traffic import TrafficService
@@ -76,6 +69,7 @@ class PanelState:
         "data_plane",
         "ai_nodes",
         "ai_node",
+        "nodes",
         "dns_failover_manager",
         "xray_stats",
         "xray_apply",
@@ -111,6 +105,7 @@ class PanelState:
         if hasattr(self.dns_failover, "public_ip_resolver"):
             self.dns_failover.public_ip_resolver = _resolve_public_ip
         self._services = (
+            self.nodes,
             self.xray_apply,
             self.ports,
             self.traffic,
@@ -141,49 +136,37 @@ class PanelState:
         return _data_plane_ai_report_source_path()
 
     def data_plane_status(self):
-        return self.data_plane.status_summary()
+        return self.nodes.data_plane_status()
 
     def data_plane_configured(self):
-        return self.data_plane.is_configured()
+        return self.nodes.data_plane_configured()
 
     def data_plane_running(self):
-        return self.data_plane.is_running()
+        return self.nodes.data_plane_running()
 
     def ai_nodes_status(self):
-        return node_statuses(self.ai_nodes)
+        return self.nodes.ai_nodes_status()
 
     def ai_node_status(self, nodes=None):
-        nodes = self.ai_nodes_status() if nodes is None else nodes
-        return aggregate_node_status(nodes)
+        return self.nodes.ai_node_status(nodes)
 
     def ai_node_running(self):
-        return any_node_running(self.ai_nodes)
-
-    @staticmethod
-    def _node_running(controller):
-        return controller.is_running()
+        return self.nodes.ai_node_running()
 
     def sync_ai_node_config(self):
-        return sync_node_configs(self.ai_nodes)
+        return self.nodes.sync_ai_node_config()
 
     def restart_ai_node_or_raise(self, node_id=None):
-        return restart_node_or_raise(self.ai_nodes, self.ai_node, node_id=node_id)
+        return self.nodes.restart_ai_node_or_raise(node_id)
 
     def ai_node_reachable(self):
-        return self.ai_node_running()
+        return self.nodes.ai_node_reachable()
 
     def read_xray_traffic_stats(self):
         return self.xray_stats.read_xray_traffic_stats()
 
     def restart_data_plane_or_raise(self):
-        if not self.data_plane.is_configured():
-            raise ValidationError("数据面未配置。")
-        if not self.data_plane.supports_restart():
-            raise ValidationError("当前数据面未配置可用的重启方式。")
-        restarted = self.data_plane.restart()
-        if not restarted:
-            raise ValidationError("当前数据面不可重启。")
-        return self.data_plane.status_summary()
+        return self.nodes.restart_data_plane_or_raise()
 
     def format_optional_display_time(self, value, default="暂无"):
         return format_optional_display_time(value, default=default)
@@ -220,6 +203,7 @@ def _make_delegate(service_attr, method_name):
 
 _DELEGATE_BINDINGS = {}
 for _service_attr, _service_type in (
+    ("nodes", NodesService),
     ("lifecycle", ApplicationLifecycle),
     ("xray_apply", XrayApplyService),
     ("ports", PortsService),
