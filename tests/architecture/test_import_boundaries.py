@@ -74,12 +74,24 @@ def _find_constructor_calls(source_root, package_name, constructor_names):
     for path in sorted(source_root.rglob("*.py")):
         module_name, _ = _module_info(path, source_root, package_name)
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        constructor_aliases = {}
+        for import_node in tree.body:
+            if isinstance(import_node, ast.ImportFrom):
+                for alias in import_node.names:
+                    if alias.name in constructor_names:
+                        constructor_aliases[alias.asname or alias.name] = alias.name
+            elif isinstance(import_node, ast.Import):
+                for alias in import_node.names:
+                    imported_name = alias.name.rpartition(".")[2]
+                    if imported_name in constructor_names:
+                        constructor_aliases[alias.asname or imported_name] = imported_name
+
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             constructor_name = None
             if isinstance(node.func, ast.Name):
-                constructor_name = node.func.id
+                constructor_name = constructor_aliases.get(node.func.id, node.func.id)
             elif isinstance(node.func, ast.Attribute):
                 constructor_name = node.func.attr
             if constructor_name in constructor_names:
@@ -140,3 +152,22 @@ def test_boundary_scanner_reports_a_synthetic_forbidden_import(tmp_path, source)
     violations = _find_forbidden_imports(source_root, "app.runtime", ("app.web",))
 
     assert violations == ["bad.py:1: app.runtime.bad imports app.web"]
+
+
+def test_constructor_scanner_reports_imported_constructor_alias(tmp_path):
+    source_root = tmp_path / "web"
+    source_root.mkdir()
+    bad_module = source_root / "bad.py"
+    bad_module.write_text(
+        "from app.xray.node import NodeController as Controller\n\n"
+        "node = Controller()\n",
+        encoding="utf-8",
+    )
+
+    violations = _find_constructor_calls(
+        source_root,
+        "app.web",
+        {"NodeController"},
+    )
+
+    assert violations == ["bad.py:3: app.web.bad constructs NodeController"]
