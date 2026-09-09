@@ -52,6 +52,26 @@ def test_create_app_resolves_state_for_the_current_flask_application():
         assert client.get("/healthz").json["data_plane_running"] is False
 
 
+def test_metrics_cache_is_scoped_to_the_current_flask_application():
+    from app import web
+    from app.web import metrics
+
+    class FakeApplication:
+        def __init__(self, data_plane_running):
+            self._data_plane_running = data_plane_running
+
+        def data_plane_running(self):
+            return self._data_plane_running
+
+    first_flask_app = web.create_app(FakeApplication(True))
+    second_flask_app = web.create_app(FakeApplication(False))
+
+    with first_flask_app.app_context():
+        assert metrics._data_plane_running_cached() == 1
+    with second_flask_app.app_context():
+        assert metrics._data_plane_running_cached() == 0
+
+
 def test_create_app_does_not_construct_panel_state(monkeypatch):
     panel_module = importlib.import_module("app.state.panel")
 

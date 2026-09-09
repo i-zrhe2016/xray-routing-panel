@@ -185,7 +185,8 @@ docker compose -f /tmp/xray-node-recovery/docker-compose.node.yml config
 python app/panel.py
 ```
 
-这会调用 `app.web.main()`（定义在 `app/web/core.py`），启动维护线程并监听 `PANEL_HOST:PANEL_PORT`。
+`app/panel.py` 会先通过 `app/bootstrap.py` 组装 Application，再调用定义在
+`app/web/core.py` 的 `app.web.main()`，启动维护线程并监听 `PANEL_HOST:PANEL_PORT`。
 
 ## 前端发布资源
 

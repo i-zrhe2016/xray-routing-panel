@@ -26,7 +26,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from flask import Response, request
+from flask import Response, current_app, request
 
 from ..config import (
     AI_NODE_ACCESS_LOG_PATH,
@@ -39,16 +39,6 @@ from ..config import (
 )
 from .core import route, state
 
-# Cache for the data-plane running check (the one SSH call on this path).
-_DP_CACHE = {"val": 0, "ts": 0.0}
-_AI_METRICS_CACHE = {
-    "ts": 0.0,
-    "available": 0,
-    "received": 0,
-    "sent": 0,
-    "egress_received": 0,
-    "egress_sent": 0,
-}
 _AI_ACCESS_LINE_RE = re.compile(
     r"\baccepted\s+(?P<network>tcp|udp):(?P<target>\S+)"
 )
@@ -56,21 +46,56 @@ _AI_LOG_TIMESTAMP_RE = re.compile(
     r"^(?P<timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)"
 )
 _AI_DESTINATION_READ_CHUNK_BYTES = 8 * 1024 * 1024
-_AI_DESTINATION_CACHE = {
-    "ts": 0.0,
-    "available": 0,
-    "window_seconds": AI_NODE_DESTINATION_WINDOW_SECONDS,
-    "requests": [],
-    "other_requests": 0,
-}
-_AI_DESTINATION_LOG_STATE = {
-    "path": "",
-    "inode": None,
-    "offset": 0,
-    "partial": "",
-    "events": deque(),
-}
-_AI_DESTINATION_LOCK = threading.Lock()
+_METRICS_STATE_EXTENSION = "panel.metrics"
+
+
+def _new_metrics_state():
+    return {
+        # Cache for the data-plane running check (the one SSH call on this
+        # path). All mutable scrape state belongs to one Flask application.
+        "data_plane_cache": {"val": 0, "ts": 0.0},
+        "ai_metrics_cache": {
+            "ts": 0.0,
+            "available": 0,
+            "received": 0,
+            "sent": 0,
+            "egress_received": 0,
+            "egress_sent": 0,
+        },
+        "destination_cache": {
+            "ts": 0.0,
+            "available": 0,
+            "window_seconds": AI_NODE_DESTINATION_WINDOW_SECONDS,
+            "requests": [],
+            "other_requests": 0,
+        },
+        "destination_log_state": {
+            "path": "",
+            "inode": None,
+            "offset": 0,
+            "partial": "",
+            "events": deque(),
+        },
+        "destination_lock": threading.Lock(),
+    }
+
+
+# Keep direct unit-level calls usable when no Flask application context exists.
+# Requests and app-context calls use the per-Flask-app state below instead.
+_FALLBACK_METRICS_STATE = _new_metrics_state()
+
+
+def _metrics_state():
+    try:
+        extensions = current_app.extensions
+    except RuntimeError:
+        return _FALLBACK_METRICS_STATE
+
+    metrics_state = extensions.get(_METRICS_STATE_EXTENSION)
+    if metrics_state is None:
+        metrics_state = _new_metrics_state()
+        extensions[_METRICS_STATE_EXTENSION] = metrics_state
+    return metrics_state
 
 
 def _esc(value):
@@ -94,14 +119,15 @@ def _iso_to_epoch(value):
 
 
 def _data_plane_running_cached():
+    cache = _metrics_state()["data_plane_cache"]
     now = time.monotonic()
-    if now - _DP_CACHE["ts"] >= METRICS_DP_TTL:
+    if now - cache["ts"] >= METRICS_DP_TTL:
         try:
-            _DP_CACHE["val"] = 1 if state.data_plane_running() else 0
+            cache["val"] = 1 if state.data_plane_running() else 0
         except Exception:
-            _DP_CACHE["val"] = 0
-        _DP_CACHE["ts"] = now
-    return _DP_CACHE["val"]
+            cache["val"] = 0
+        cache["ts"] = now
+    return cache["val"]
 
 
 def _read_ai_node_metrics():
@@ -150,8 +176,9 @@ def _parse_ai_node_metrics_payload(payload):
 
 
 def _ai_node_metrics_cached():
+    cache = _metrics_state()["ai_metrics_cache"]
     now = time.monotonic()
-    if now - _AI_METRICS_CACHE["ts"] >= METRICS_DP_TTL:
+    if now - cache["ts"] >= METRICS_DP_TTL:
         try:
             result = _read_ai_node_metrics()
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -164,9 +191,9 @@ def _ai_node_metrics_cached():
                 "egress_received": 0,
                 "egress_sent": 0,
             }
-        _AI_METRICS_CACHE.update(result)
-        _AI_METRICS_CACHE["ts"] = now
-    return _AI_METRICS_CACHE
+        cache.update(result)
+        cache["ts"] = now
+    return cache
 
 
 def _parse_ai_log_timestamp(line, fallback):
@@ -289,15 +316,16 @@ def _read_ai_destination_metrics():
             "other_requests": 0,
         }
 
-    with _AI_DESTINATION_LOCK:
-        state = _AI_DESTINATION_LOG_STATE
+    metrics_state = _metrics_state()
+    with metrics_state["destination_lock"]:
+        log_state = metrics_state["destination_log_state"]
         reset = (
-            state["path"] != str(path)
-            or state["inode"] != info.st_ino
-            or info.st_size < state["offset"]
+            log_state["path"] != str(path)
+            or log_state["inode"] != info.st_ino
+            or info.st_size < log_state["offset"]
         )
         if reset:
-            state.update(
+            log_state.update(
                 {
                     "path": str(path),
                     "inode": info.st_ino,
@@ -307,15 +335,15 @@ def _read_ai_destination_metrics():
                 }
             )
 
-        initial_tail = state["offset"] == 0 and info.st_size > _AI_DESTINATION_READ_CHUNK_BYTES
+        initial_tail = log_state["offset"] == 0 and info.st_size > _AI_DESTINATION_READ_CHUNK_BYTES
         if initial_tail:
-            state["offset"] = info.st_size - _AI_DESTINATION_READ_CHUNK_BYTES
+            log_state["offset"] = info.st_size - _AI_DESTINATION_READ_CHUNK_BYTES
 
         try:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
-                handle.seek(state["offset"])
+                handle.seek(log_state["offset"])
                 chunk = handle.read(_AI_DESTINATION_READ_CHUNK_BYTES)
-                state["offset"] = handle.tell()
+                log_state["offset"] = handle.tell()
         except OSError:
             return {
                 "available": 0,
@@ -324,25 +352,25 @@ def _read_ai_destination_metrics():
                 "other_requests": 0,
             }
 
-        text = state["partial"] + chunk
+        text = log_state["partial"] + chunk
         lines = text.splitlines()
         if text and not text.endswith(("\n", "\r")):
-            state["partial"] = lines.pop() if lines else text
+            log_state["partial"] = lines.pop() if lines else text
         else:
-            state["partial"] = ""
+            log_state["partial"] = ""
         if initial_tail and lines:
             lines = lines[1:]
 
         for line in lines:
             event = _parse_ai_access_line(line, fallback_timestamp=now)
             if event is not None:
-                state["events"].append(event)
+                log_state["events"].append(event)
 
         cutoff = now - AI_NODE_DESTINATION_WINDOW_SECONDS
-        while state["events"] and state["events"][0]["timestamp"] < cutoff:
-            state["events"].popleft()
+        while log_state["events"] and log_state["events"][0]["timestamp"] < cutoff:
+            log_state["events"].popleft()
         return _summarize_ai_destination_events(
-            state["events"],
+            log_state["events"],
             now,
             AI_NODE_DESTINATION_WINDOW_SECONDS,
             AI_NODE_DESTINATION_MAX_LABELS,
@@ -350,8 +378,9 @@ def _read_ai_destination_metrics():
 
 
 def _ai_destination_metrics_cached():
+    cache = _metrics_state()["destination_cache"]
     now = time.monotonic()
-    if now - _AI_DESTINATION_CACHE["ts"] >= METRICS_DP_TTL:
+    if now - cache["ts"] >= METRICS_DP_TTL:
         try:
             result = _read_ai_destination_metrics()
         except (OSError, TypeError, ValueError):
@@ -361,9 +390,9 @@ def _ai_destination_metrics_cached():
                 "requests": [],
                 "other_requests": 0,
             }
-        _AI_DESTINATION_CACHE.update(result)
-        _AI_DESTINATION_CACHE["ts"] = now
-    return _AI_DESTINATION_CACHE
+        cache.update(result)
+        cache["ts"] = now
+    return cache
 
 
 class _Renderer:

@@ -38,7 +38,7 @@ Last verified: 2026-09-09 @ working tree
 
 ## Known Issues / Failing Checks
 
-- 全量 `.venv/bin/python -m pytest -q` 通过：268 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
+- 全量 `.venv/bin/python -m pytest -q` 通过：270 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
 - NodeController、fleet、stats 与 runtime 聚焦测试均通过；backend 选择覆盖 SSH、local、Docker、unmanaged 和旧控制器别名。
 - Phase 4 聚焦回归通过：生命周期、storage、组合、节点控制、DNS、商业和 unified entry 均通过；新增领域 schema hook、SQLite 共享写锁、runtime worker、node fleet、Xray stats 与 AI launcher 测试均通过 Ruff。修改后的 state/storage/web 文件通过 `py_compile` 和 `git diff --check`；`ruff check app/state` 仍报告既有的 `BLE001`、`SIM117` 等规则告警。
 - 本机部署使用了 `docker compose up -d --build`；仓库文档引用的 CPU-aware 构建脚本在本机不存在，因此未使用该脚本。

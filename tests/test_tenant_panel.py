@@ -95,10 +95,10 @@ def load_panel_module(temp_root, panel_username="", panel_password="", probe_ena
     os.environ["PROBE_ENABLED"] = "1" if probe_enabled else "0"
     os.environ["PROBE_TEST_LISTEN_PORT"] = str(probe_test_listen_port or "")
 
-    # app.panel imports configuration and the web singleton at module import
-    # time. Remove the whole application graph so each test gets its own
-    # temporary database and runtime paths instead of stale constants from the
-    # previous test case.
+    # app.panel imports configuration, builds the application graph and injects
+    # it into the Web factory at module import time. Remove the whole graph so
+    # each test gets its own temporary database and runtime paths instead of
+    # stale constants from the previous test case.
     for module_name in sorted(
         (
             name
