@@ -77,10 +77,10 @@ class ApplicationLifecycle:
             pass
 
     def start(self):
-        if self._started:
-            return
         if self._stopped:
             raise RuntimeError("Application lifecycle cannot be restarted after stop")
+        if self._started:
+            return
         self.bootstrap()
         worker_threads = []
         for worker, name in (
@@ -100,9 +100,11 @@ class ApplicationLifecycle:
             return
         self._stopped = True
         self.stop_event.set()
-        self.traffic.sync_traffic_state()
-        current_thread = threading.current_thread()
-        for thread in self._worker_threads:
-            if thread is current_thread:
-                continue
-            thread.join(timeout=WORKER_JOIN_TIMEOUT_SECONDS)
+        try:
+            self.traffic.sync_traffic_state()
+        finally:
+            current_thread = threading.current_thread()
+            for thread in self._worker_threads:
+                if thread is current_thread:
+                    continue
+                thread.join(timeout=WORKER_JOIN_TIMEOUT_SECONDS)

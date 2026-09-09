@@ -5,6 +5,8 @@ from pathlib import Path
 from threading import Event
 from unittest.mock import Mock, patch
 
+import pytest
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -262,6 +264,58 @@ def test_application_lifecycle_stop_is_idempotent():
 
     assert stop_event.is_set()
     assert events == ["traffic.sync"]
+
+
+def test_application_lifecycle_cannot_restart_after_stop():
+    from app.state.lifecycle import ApplicationLifecycle
+
+    lifecycle = ApplicationLifecycle(
+        database=FakeDatabase([]),
+        schema_bootstrap=Mock(),
+        ports=Mock(),
+        traffic=FakeTraffic([]),
+        probes=Mock(),
+        dns_failover=Mock(),
+        ai_routing=Mock(),
+        commerce=Mock(),
+        xray_apply=Mock(),
+        stop_event=Event(),
+    )
+    lifecycle.bootstrap = Mock()
+
+    lifecycle.start()
+    lifecycle.stop()
+
+    with pytest.raises(RuntimeError, match="cannot be restarted"):
+        lifecycle.start()
+
+    lifecycle.bootstrap.assert_called_once_with()
+
+
+def test_application_lifecycle_joins_workers_when_final_sync_fails():
+    from app.state.lifecycle import ApplicationLifecycle
+
+    traffic = Mock()
+    traffic.sync_traffic_state.side_effect = RuntimeError("sync failed")
+    lifecycle = ApplicationLifecycle(
+        database=Mock(),
+        schema_bootstrap=Mock(),
+        ports=Mock(),
+        traffic=traffic,
+        probes=Mock(),
+        dns_failover=Mock(),
+        ai_routing=Mock(),
+        commerce=Mock(),
+        xray_apply=Mock(),
+        stop_event=Event(),
+    )
+    worker_thread = Mock()
+    lifecycle._worker_threads = [worker_thread]
+
+    with pytest.raises(RuntimeError, match="sync failed"):
+        lifecycle.stop()
+
+    worker_thread.join.assert_called_once()
 
 
 def test_application_lifecycle_starts_runtime_workers_after_bootstrap():
