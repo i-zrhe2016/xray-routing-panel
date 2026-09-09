@@ -352,6 +352,16 @@ class Application(PanelState):
         "lifecycle",
     )
 
+    def start(self):
+        """Start the application lifecycle owned by this application."""
+
+        return self.lifecycle.start()
+
+    def stop(self):
+        """Stop the application lifecycle owned by this application."""
+
+        return self.lifecycle.stop()
+
 
 def build_application():
     """Build and return the complete control-plane application facade."""

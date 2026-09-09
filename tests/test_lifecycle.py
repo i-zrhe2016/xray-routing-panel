@@ -1,5 +1,11 @@
+import importlib
+import subprocess
+import sys
+from pathlib import Path
 from threading import Event
 from unittest.mock import Mock, patch
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeConnection:
@@ -136,6 +142,61 @@ class FakeWorker:
         self.events.append(("worker.run", self.label))
 
 
+def test_application_exposes_explicit_start_and_stop_contract():
+    from app.bootstrap import Application
+
+    lifecycle = Mock()
+    application = Application.__new__(Application)
+    application.lifecycle = lifecycle
+
+    assert application.start() is lifecycle.start.return_value
+    assert application.stop() is lifecycle.stop.return_value
+    lifecycle.start.assert_called_once_with()
+    lifecycle.stop.assert_called_once_with()
+
+
+def test_importing_web_does_not_start_runtime_workers():
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import threading; before = set(threading.enumerate()); import app.web; "
+                "after = set(threading.enumerate()); "
+                "assert not {thread.name for thread in after - before if thread.name in "
+                "{'panel-maintenance', 'dns-failover'}}, after"
+            ),
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
+def test_panel_main_uses_the_composed_application_for_lifecycle(monkeypatch):
+    panel = importlib.import_module("app.panel")
+    from app.web import core
+
+    start = Mock()
+    stop = Mock()
+    run = Mock()
+    signals = Mock()
+    monkeypatch.setattr(panel.application, "start", start)
+    monkeypatch.setattr(panel.application, "stop", stop)
+    monkeypatch.setattr(panel.app, "run", run)
+    monkeypatch.setattr(core.signal, "signal", signals)
+
+    panel.main()
+
+    start.assert_called_once_with()
+    stop.assert_called_once_with()
+    run.assert_called_once()
+    assert signals.call_count == 2
+
+
 def test_application_lifecycle_owns_bootstrap_order():
     from app.state.lifecycle import ApplicationLifecycle
 
@@ -232,6 +293,7 @@ def test_application_lifecycle_starts_runtime_workers_after_bootstrap():
 
     with patch("app.state.lifecycle.threading.Thread", side_effect=make_thread) as thread_factory:
         lifecycle.start()
+        lifecycle.start()
 
     assert [call.kwargs["name"] for call in thread_factory.call_args_list] == [
         "panel-maintenance",
@@ -239,3 +301,11 @@ def test_application_lifecycle_starts_runtime_workers_after_bootstrap():
     ]
     assert [thread.start.call_count for thread in threads] == [1, 1]
     assert events[-2:] == [("thread.start", "panel-maintenance"), ("thread.start", "dns-failover")]
+    assert lifecycle._worker_threads == threads
+    traffic_syncs_before_stop = events.count("traffic.sync")
+
+    lifecycle.stop()
+    lifecycle.stop()
+
+    assert [thread.join.call_count for thread in threads] == [1, 1]
+    assert events.count("traffic.sync") == traffic_syncs_before_stop + 1

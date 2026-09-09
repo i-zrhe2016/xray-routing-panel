@@ -1,4 +1,3 @@
-import atexit
 import importlib
 import logging
 import secrets
@@ -952,9 +951,9 @@ def handle_shutdown(signum, _frame):
     raise KeyboardInterrupt(f"received signal {signum}")
 
 
-def main():
-    state.lifecycle.start()
-    atexit.register(state.lifecycle.stop)
+def main(application_instance=None):
+    lifecycle_owner = application if application_instance is None else application_instance
+    lifecycle_owner.start()
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
     show_server_banner = flask_cli.show_server_banner
@@ -963,4 +962,4 @@ def main():
         app.run(host=PANEL_HOST, port=PANEL_PORT, threaded=True, use_reloader=False)
     finally:
         flask_cli.show_server_banner = show_server_banner
-        state.lifecycle.stop()
+        lifecycle_owner.stop()
