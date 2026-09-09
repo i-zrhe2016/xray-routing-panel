@@ -3,7 +3,6 @@ import importlib
 import sys
 from pathlib import Path
 
-
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -13,6 +12,7 @@ for module_name in [
     "app.auth",
     "app.subscriptions",
     "app.state",
+    "app.bootstrap",
     "app.web",
 ]:
     if module_name in sys.modules:
@@ -20,11 +20,15 @@ for module_name in [
     else:
         importlib.import_module(module_name)
 
+from app.bootstrap import build_application
 from app.errors import ValidationError
 from app.state import PanelState
-from app.web import app, main, state
+from app.web import create_app, main
 
-__all__ = ["app", "main", "state", "PanelState", "ValidationError"]
+state = build_application()
+app = create_app(state)
+
+__all__ = ["PanelState", "ValidationError", "app", "main", "state"]
 
 
 if __name__ == "__main__":
