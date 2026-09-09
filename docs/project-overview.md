@@ -327,8 +327,9 @@ docker compose run --rm xray-routing-panel-db-backup \
 
 ## 代码入口
 
-后端（`app/` 已包化，`app/panel.py` 为入口，导出 `app`/`state`/`main`）：
+后端（`app/` 已包化，`app/panel.py` 为进程入口，`app/bootstrap.py` 为组合根，入口模块导出 `app`/`state`/`main`）：
 
+- [../app/bootstrap.py](../app/bootstrap.py): 组装 SQLite、节点控制器、域 service、runtime worker 和 `ApplicationLifecycle`，返回公开分域 API 的 Application
 - [../app/web/](../app/web/): app factory（`create_app`）+ 按域分的视图模块（`admin_views`、`admin_api`、`customer_api`、`customer_views`、`portal_views`、`tenant_views`、`subscription_views`、`health`）与共享 `core.py`（presenter、auth 守卫、`@route` 收集器）
 - [../app/state/](../app/state/): `PanelState` facade，组合域 service（`PortsService`、`TrafficService`、`ProbesService`、`DnsFailoverService`、`AiRoutingService`、`CommerceService`、`DiagnosticsService`）与 `ApplicationLifecycle`；维护循环位于 `../app/runtime/`，持有 `data_plane` 和 `ai_node` 两个受管节点控制器
 - [../app/config/](../app/config/) / [../app/auth/](../app/auth/): 配置常量/解析器、三套会话（管理员/租户/客户）与 CSRF

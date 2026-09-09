@@ -5,9 +5,9 @@ Last verified: 2026-09-09 @ working tree
 ## Current Focus
 
 - AI Routing 第一阶段 Python 拆分与 NodeController 第二阶段均已合并到 `main`；本机默认控制面与数据库备份服务已按 `6c8eef3` 重建并通过健康检查，Xray profile 未启用。
-- PanelState 第三阶段依赖收缩已完成：它保留组合根/兼容 facade 角色，域 service 改为持有显式 repository、renderer、node controller、锁和兄弟 service 依赖。
+- PanelState 第三阶段依赖收缩已完成：它保留兼容 facade 角色，组合根职责已移到 `app/bootstrap.py`；域 service 持有显式 repository、renderer、node controller、锁和兄弟 service 依赖。
 - 应用级 Core 协调器第四阶段已完成：SQLite 连接/状态存储和 schema bootstrap 位于 `app/storage/`，Xray apply 事务位于 `app/xray/apply.py`，节点 fleet helper、Xray stats reader、runtime workers 和 `ApplicationLifecycle` 均已从旧 Core 边界移出。
-- 第五阶段已开始：`app/bootstrap.py` 是控制面 composition root，`app/panel.py` 构造并注入 Application，Web factory 不再在 import-time 创建 PanelState；架构边界检查和 Application 分域 API 已加入测试保护。
+- 第五阶段已完成：`app/bootstrap.py` 是控制面 composition root，`app/panel.py` 构造并注入 Application，Web factory 不再在 import-time 创建 PanelState；Application 生命周期和架构边界均已有测试保护。
 
 ## Implemented
 
@@ -32,18 +32,18 @@ Last verified: 2026-09-09 @ working tree
 - `app/xray/ai_routing/launcher.py` 承担 AI domain manager 的本地/容器进程边界；`AiRoutingService` 只通过显式 runner collaborator 触发重算，不再直接调用 subprocess。
 - `app/runtime/maintenance.py` 与 `app/runtime/dns_failover.py` 只负责调度、停止事件和异常边界；它们调用应用 service，不包含 SQL、Xray command 或 DNS policy。
 - `app/state/lifecycle.py` 的 `ApplicationLifecycle` 负责 schema、端口初始化、流量同步、初始配置 apply、DNS 快照，以及 runtime worker 的启动和停止编排；Web 入口只调用 lifecycle。
+- `Application.start()`/`stop()` 是统一生命周期入口：启动先完成 bootstrap，再创建命名 daemon worker；停止设置 stop event、同步流量并在 `finally` 中 join worker，重复 stop 幂等，停止后不允许重启。
 - `PanelState` 保留扁平兼容 facade，但所有域 service 直接依赖 `SQLiteDatabase`、Xray apply、节点控制器和 stats reader，不再经过 Core 转发；新的 `Application` 由 `app/bootstrap.py` 返回。
 - 本机默认控制面和数据库备份服务已按 `6c8eef3` 重建并启动；面板 `/healthz` 连续三次返回 `ok=true`，控制面容器为 `healthy`，备份容器的 cron 正常运行。Xray profile 当前未启用。
 
 ## In Progress
 
-- T5.5 Application facade 公共 API 和 dashboard/health 的首批分域读取已完成；其余 view 的扁平 facade 调用仍在迁移期保留。
-- T5.6 已完成：仓库内不再依赖 `node_control.py`，旧导入路径删除策略已由架构测试和文档固定。
-- T5.7 已完成：AI Routing 测试和内部调用已迁移到 canonical modules，`ai_domain_manager.py` 降级为仅转发 `main` 的 CLI 兼容入口；下一张票据是 T5.8。
+- 第五阶段 T5.1-T5.9 已完成；后续以功能、稳定性和运维改动为主，除非验收暴露本阶段范围内的 correctness defect，不再继续结构性重构。
+- Application 分域 API 已用于 Dashboard 与 health 的首批读取，其余 view 仍可通过具体扁平 delegate 逐步迁移；这是兼容性迁移，不改变当前组合根边界。
 
 ## Known Issues / Failing Checks
 
-- 全量 `.venv/bin/python -m pytest -q` 通过：288 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
+- 全量 `PYTHONPATH=. .venv/bin/python -m pytest -q` 通过：293 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
 - NodeController、fleet、stats 与 runtime 聚焦测试均通过；backend 选择覆盖 SSH、local、Docker、unmanaged 和旧控制器别名。
 - Phase 4 聚焦回归通过：生命周期、storage、组合、节点控制、DNS、商业和 unified entry 均通过；新增领域 schema hook、SQLite 共享写锁、runtime worker、node fleet、Xray stats 与 AI launcher 测试均通过 Ruff。修改后的 state/storage/web 文件通过 `py_compile` 和 `git diff --check`；`ruff check app/state` 仍报告既有的 `BLE001`、`SIM117` 等规则告警。
 - 本机部署使用了 `docker compose up -d --build`；仓库文档引用的 CPU-aware 构建脚本在本机不存在，因此未使用该脚本。
@@ -57,10 +57,14 @@ Last verified: 2026-09-09 @ working tree
 
 - Flask 控制面由 `app/panel.py` 通过 `app/bootstrap.py` 组装 Application，再交给 `app/web/` 的 `create_app(application)`；`app/state/` 服务管理 SQLite，`app/xray/node/` 通过 `NodeController` 选择并编排本地、Docker、SSH 或 unmanaged backend，节点类型统一从 canonical package 导入。
 - `Application` 暴露 `ports`、`traffic`、`probes`、`nodes`、`ai_routing`、`dns_failover`、`commerce`、`diagnostics` 和 `lifecycle`；各域 service 通过显式 collaborator 访问数据库、渲染、节点控制、锁和跨域能力，不再通过全局 facade 回溯依赖。领域 schema 初始化也由各 service 持有，`ApplicationLifecycle` 只负责调用顺序。
+- `app/panel.py` 是进程入口并持有唯一生产组装点：`build_application()` 完成依赖构造，`create_app(application)` 创建 Web consumer；`panel.main()` 将同一个 Application 交给 `app.web.main(application)`。
+- `Application.start()`/`stop()` 委托 `ApplicationLifecycle` 管理初始化、runtime worker 启停和关闭等待；导入 `app.web` 不创建 Application/PanelState，也不启动命名 runtime worker。
+- 依赖方向由 `tests/architecture/` 固化为 `web -> Application/State -> state/infrastructure -> external systems`：`xray`、`storage`、`runtime` 不得反向导入 `app.web`，`storage` 不得导入 `app.state`，Web 不得构造业务依赖。
+- 兼容入口状态：`app/xray/node_control.py` 已删除；`app/xray/ai_domain_manager.py` 仅保留转发 `main` 的 CLI 入口；`PanelState` 仍保留具体扁平 delegate，供未迁移调用方使用。
 - AI 管理器与面板通过运行时目录中的应用锁和待应用标记协作；启用外部 reloader 时由 watcher 负责 Xray 进程重载。
 - AI Routing 包的模块边界和数据流见 [AI 路由](ai-routing.md) 与 [小时分析流程图](diagrams/ai-hourly-analysis.svg)。
 - 报告由管理器写入共享 `app/xray/reports`，面板从同一卷读取；详细流程见 [AI 路由](ai-routing.md)。
 
 ## Next
 
-- 进入 T5.8，统一由 `app/bootstrap.py` 管理 Application/runtime worker 的生命周期；继续保持 `ai_domain_manager.py` 仅作为 CLI 兼容转发入口。如需启用本机 Xray profile，另按完整栈验收流程执行。
+- 第五阶段已收尾，停止结构性重构；后续仅按独立功能/缺陷 ticket 演进。若需启用本机 Xray profile，另按完整栈验收流程执行。
