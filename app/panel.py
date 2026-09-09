@@ -23,12 +23,21 @@ for module_name in [
 from app.bootstrap import build_application
 from app.errors import ValidationError
 from app.state import PanelState
-from app.web import create_app, main
+from app.web import create_app
+from app.web import main as _serve
 
-state = build_application()
-app = create_app(state)
+application = build_application()
+state = application
+app = create_app(application)
 
-__all__ = ["PanelState", "ValidationError", "app", "main", "state"]
+
+def main():
+    """Run the Web server with the Application assembled by this module."""
+
+    return _serve(application)
+
+
+__all__ = ["PanelState", "ValidationError", "app", "application", "main", "state"]
 
 
 if __name__ == "__main__":

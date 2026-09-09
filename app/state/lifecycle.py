@@ -2,6 +2,8 @@
 
 import threading
 
+WORKER_JOIN_TIMEOUT_SECONDS = 5.0
+
 
 class ApplicationLifecycle:
     """Coordinate application startup and shutdown dependencies.
@@ -39,6 +41,8 @@ class ApplicationLifecycle:
         self.maintenance_worker = maintenance_worker
         self.dns_failover_worker = dns_failover_worker
         self._worker_threads = []
+        self._started = False
+        self._stopped = False
 
     def init_db(self):
         self.schema_bootstrap.initialize(
@@ -73,8 +77,12 @@ class ApplicationLifecycle:
             pass
 
     def start(self):
+        if self._stopped:
+            raise RuntimeError("Application lifecycle cannot be restarted after stop")
+        if self._started:
+            return
         self.bootstrap()
-        self._worker_threads = []
+        worker_threads = []
         for worker, name in (
             (self.maintenance_worker, "panel-maintenance"),
             (self.dns_failover_worker, "dns-failover"),
@@ -83,10 +91,20 @@ class ApplicationLifecycle:
                 continue
             thread = threading.Thread(target=worker.run, name=name, daemon=True)
             thread.start()
-            self._worker_threads.append(thread)
+            worker_threads.append(thread)
+        self._worker_threads = worker_threads
+        self._started = True
 
     def stop(self):
-        if self.stop_event.is_set():
+        if self._stopped:
             return
+        self._stopped = True
         self.stop_event.set()
-        self.traffic.sync_traffic_state()
+        try:
+            self.traffic.sync_traffic_state()
+        finally:
+            current_thread = threading.current_thread()
+            for thread in self._worker_threads:
+                if thread is current_thread:
+                    continue
+                thread.join(timeout=WORKER_JOIN_TIMEOUT_SECONDS)
