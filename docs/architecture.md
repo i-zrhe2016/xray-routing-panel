@@ -41,6 +41,15 @@
 - 多节点状态聚合和 Xray `statsquery` 解析分别位于 `app/xray/node/fleet.py` 与 `app/xray/stats.py`；runtime 调度位于 `app/runtime/`，生命周期负责 bootstrap 及 worker 启停，代码位于 `app/state/lifecycle.py`
 - AI domain manager 的本地/容器进程启动位于 `app/xray/ai_routing/launcher.py`；`app/state/ai_routing.py` 只依赖 runner，不直接执行系统进程
 - `PanelState` 只保留扁平兼容 facade；旧的 Core 协调器已删除，Web 入口由 `app/panel.py` 注入 Application 后直接调用 `ApplicationLifecycle` 和 runtime worker
+
+#### Composition root 与生命周期
+
+- 生产进程的组装入口只有 `app/bootstrap.py`：`build_application()` 集中创建数据库、节点控制器、域 service、runtime worker 和 `ApplicationLifecycle`；`app/panel.py` 负责把同一个 Application 交给 `create_app(application)` 和 `app.web.main(application)`。
+- `Application.start()`/`stop()` 是 Web 与生命周期之间的稳定入口。`ApplicationLifecycle` 先完成 schema/状态 bootstrap，再启动命名 daemon worker；停止时设置 stop event、同步流量并等待 worker，重复停止幂等，停止后不支持重启。
+- `app/web/` 是 consumer：`create_app(application)` 只保存调用方提供的对象并注册视图，不构造 `PanelState`、数据库、节点控制器或业务 service；导入 Web 包本身不会启动 runtime worker。
+- 依赖方向由 `tests/architecture/` 的 AST 测试保护：Web 可消费 Application/State，Application/state 通过显式 collaborator 使用 storage、Xray 等基础设施；`xray`、`storage`、`runtime` 不得反向依赖 Web，`storage` 不得依赖 state，Web 不得直接构造业务依赖。
+- 兼容层状态：`app/xray/node_control.py` 已移除；`app/xray/ai_domain_manager.py` 只转发 canonical `app.xray.ai_routing.runner.main` 作为 CLI 入口；`PanelState` 的具体扁平 delegate 暂为迁移兼容 API。
+
 - Flask 同时托管：管理后台 SPA（`/`）、订阅者门户 SPA（`/portal`）、公共/认证页（`/plans`、`/customer/*`）、租户订阅直达（`/tenant/<token>`）和探针/AI 仪表盘；前端发布资源位于 `app/static/{admin,portal,landing}`，Admin 源码与 Vite 配置位于 `frontend/`
 - 保存端口、租户、流量、AI 聚合，以及商业化数据（客户、套餐、订单、服务订阅、支付凭证）到 `data/panel.db`
 - 保存 DNS 故障切换状态和事件历史到 `data/panel.db`
