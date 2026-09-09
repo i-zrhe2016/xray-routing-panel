@@ -17,7 +17,7 @@ Last verified: 2026-09-09 @ working tree
 - Compose 注入管理器执行模式、共享数据库路径和外部 reloader 开关。
 - 已移除未使用的编排清单和专属部署文档；备份 allowlist 与文档导航仅保留 Compose 入口。
 - 强制回退报告不再假设上游 host/port；未管理数据面报告为 `unmanaged`，不执行不存在的重启。
-- AI 路由实现已拆分到 `app/xray/ai_routing/`：`runner.py` 负责 CLI/定时任务，`manager.py` 负责编排，其余模块分别负责观测、分类、候选、选择、SQLite 仓储和产物；旧 `app/xray/ai_domain_manager.py` 保留为兼容 facade，并完整保留历史 helper 导出。
+- AI 路由实现已拆分到 `app/xray/ai_routing/`：`runner.py` 负责 CLI/定时任务，`manager.py` 负责编排，其余模块分别负责观测、分类、候选、选择、SQLite 仓储和产物；旧 `app/xray/ai_domain_manager.py` 仅保留无状态 CLI 转发，不再导出实现 helper。
 - NodeController 已拆分到 `app/xray/node/` 并合并到 `main`：`controller.py` 只负责 backend 选择和编排，`backend.py` 定义节点契约，`ssh.py`、`docker.py`、`local.py` 分别实现传输/进程操作，`probes.py` 与 `files.py` 分离探测和文件同步；T5.6 已删除 `app/xray/node_control.py`，仓库内统一使用 canonical imports。
 - `app/state/` 域 service 不再保存 `PanelState` back-reference；`PanelState` 的旧扁平调用面由具体 delegate 保留，已移除通用属性代理。
 - `app/storage/sqlite.py` 提供带共享写锁的 `SQLiteDatabase.connect()` 与显式 `transaction()`；`app/storage/schema.py` 只持有通用 `app_state` DDL，端口、流量、探针、AI、DNS 和商业表由各自 service 的幂等 schema hook 创建/迁移，并由生命周期在同一连接上按依赖顺序调用。
@@ -38,11 +38,12 @@ Last verified: 2026-09-09 @ working tree
 ## In Progress
 
 - T5.5 Application facade 公共 API 和 dashboard/health 的首批分域读取已完成；其余 view 的扁平 facade 调用仍在迁移期保留。
-- T5.6 已完成：仓库内不再依赖 `node_control.py`，旧导入路径删除策略已由架构测试和文档固定；下一张票据是 T5.7。
+- T5.6 已完成：仓库内不再依赖 `node_control.py`，旧导入路径删除策略已由架构测试和文档固定。
+- T5.7 已完成：AI Routing 测试和内部调用已迁移到 canonical modules，`ai_domain_manager.py` 降级为仅转发 `main` 的 CLI 兼容入口；下一张票据是 T5.8。
 
 ## Known Issues / Failing Checks
 
-- 全量 `.venv/bin/python -m pytest -q` 通过：283 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
+- 全量 `.venv/bin/python -m pytest -q` 通过：288 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
 - NodeController、fleet、stats 与 runtime 聚焦测试均通过；backend 选择覆盖 SSH、local、Docker、unmanaged 和旧控制器别名。
 - Phase 4 聚焦回归通过：生命周期、storage、组合、节点控制、DNS、商业和 unified entry 均通过；新增领域 schema hook、SQLite 共享写锁、runtime worker、node fleet、Xray stats 与 AI launcher 测试均通过 Ruff。修改后的 state/storage/web 文件通过 `py_compile` 和 `git diff --check`；`ruff check app/state` 仍报告既有的 `BLE001`、`SIM117` 等规则告警。
 - 本机部署使用了 `docker compose up -d --build`；仓库文档引用的 CPU-aware 构建脚本在本机不存在，因此未使用该脚本。
@@ -62,4 +63,4 @@ Last verified: 2026-09-09 @ working tree
 
 ## Next
 
-- 进入 T5.7，先确认 `ai_domain_manager.py` 的 CLI、运维脚本和测试调用方，再迁移调用并评估兼容 facade 的最小保留面；如需启用本机 Xray profile，另按完整栈验收流程执行。
+- 进入 T5.8，统一由 `app/bootstrap.py` 管理 Application/runtime worker 的生命周期；继续保持 `ai_domain_manager.py` 仅作为 CLI 兼容转发入口。如需启用本机 Xray profile，另按完整栈验收流程执行。

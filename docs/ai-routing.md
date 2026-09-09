@@ -187,7 +187,7 @@ sed -n '1,220p' app/xray/reports/hourly-domains/latest.json
 - `ai_routing/runner.py`：定时任务和 CLI 入口
 - `ai_routing/manager.py`：一次运行的编排
 - `ai_routing/observations.py`、`classifier.py`、`candidates.py`、`selector.py`、`repository.py`、`artifact.py`：按职责处理观测、分类、候选、选择、持久化和产物
-- `ai_domain_manager.py`：兼容旧导入的 facade，不再承载实现
+- `ai_domain_manager.py`：仅保留旧 `python -m app.xray.ai_domain_manager` 调用的无状态 CLI 转发；实现和 canonical CLI 使用 `ai_routing/runner.py`
 - `google_search_mcp.py`：辅助归类用 MCP server
 - `runtime/`：渲染产物和运行时缓存
 - `reports/`：小时域名报告

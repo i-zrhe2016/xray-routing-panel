@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.xray import ai_domain_manager
-from app.xray.ai_routing import artifact, manager, runner
+from app.xray.ai_routing import runner
 from app.xray.node import DockerBackend, LocalBackend, NodeController, SSHBackend, UnmanagedBackend
 
 
@@ -83,11 +83,36 @@ def test_internal_code_does_not_import_removed_node_control_module():
     assert not violations, "\n".join(violations)
 
 
-def test_ai_domain_manager_facade_keeps_canonical_cli_and_helper_exports():
+def test_ai_domain_manager_facade_is_cli_only():
     assert ai_domain_manager.main is runner.main
-    assert ai_domain_manager.LOCK_BUSY_EXIT_CODE == manager.LOCK_BUSY_EXIT_CODE
-    assert ai_domain_manager.build_domain_report is artifact.build_domain_report
-    assert ai_domain_manager.write_routing_fragment is artifact.write_routing_fragment
+    assert ai_domain_manager.__all__ == ["main"]
+    for helper_name in (
+        "LOCK_BUSY_EXIT_CODE",
+        "build_domain_report",
+        "write_routing_fragment",
+        "run_once",
+    ):
+        assert not hasattr(ai_domain_manager, helper_name)
+
+
+def test_internal_code_does_not_import_ai_domain_manager_facade():
+    from .test_import_boundaries import _find_forbidden_imports
+
+    repository_root = Path(__file__).resolve().parents[2]
+    violations = []
+    for source_root, package_name in (
+        (repository_root / "app", "app"),
+        (repository_root / "scripts", "scripts"),
+    ):
+        violations.extend(
+            _find_forbidden_imports(
+                source_root,
+                package_name,
+                ("app.xray.ai_domain_manager",),
+            )
+        )
+
+    assert not violations, "\n".join(violations)
 
 
 def test_canonical_packages_do_not_depend_on_compatibility_facades():

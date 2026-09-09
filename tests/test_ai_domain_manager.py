@@ -7,7 +7,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from app.xray import ai_domain_manager
+from app.xray.ai_routing import (
+    artifact,
+    candidates,
+    classifier,
+    common,
+    manager,
+    observations,
+    repository,
+    selector,
+)
+from app.xray.operation_lock import LockBusyError, exclusive_file_lock
 
 
 class _FakeHttpResponse:
@@ -25,7 +35,7 @@ class _FakeHttpResponse:
 
 
 class AiDomainManagerTest(unittest.TestCase):
-    def test_legacy_facade_exports_split_classifier_helpers(self):
+    def test_canonical_classifier_exports_split_helpers(self):
         for name in (
             "build_codex_command",
             "extract_output_text",
@@ -33,15 +43,15 @@ class AiDomainManagerTest(unittest.TestCase):
             "sync_codex_home",
             "validate_classification_results",
         ):
-            self.assertTrue(callable(getattr(ai_domain_manager, name, None)), name)
+            self.assertTrue(callable(getattr(classifier, name, None)), name)
 
-    @mock.patch.object(ai_domain_manager.subprocess, "run")
+    @mock.patch.object(artifact.subprocess, "run")
     def test_rerender_config_passes_panel_ports_file_next_to_config(self, mocked_run):
         mocked_run.return_value = mock.Mock(returncode=0, stderr="", stdout="")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            ai_domain_manager.rerender_config(
+            artifact.rerender_config(
                 "app.xray.render_config",
                 root / "xray.env",
                 root / "runtime" / "config.json",
@@ -65,8 +75,8 @@ class AiDomainManagerTest(unittest.TestCase):
                 raise sqlite3.OperationalError("database is locked")
             return "ok"
 
-        with mock.patch.object(ai_domain_manager.time, "sleep") as sleep:
-            result = ai_domain_manager.run_with_sqlite_lock_retry(operation)
+        with mock.patch.object(common.time, "sleep") as sleep:
+            result = common.run_with_sqlite_lock_retry(operation)
 
         self.assertEqual(result, "ok")
         self.assertEqual(len(attempts), 3)
@@ -77,11 +87,11 @@ class AiDomainManagerTest(unittest.TestCase):
             db_path = Path(tmpdir) / "panel.db"
             db_path.touch()
             with mock.patch.object(
-                ai_domain_manager,
+                repository,
                 "_save_ai_domains_to_panel_db_once",
                 side_effect=sqlite3.OperationalError("database is locked"),
-            ), mock.patch.object(ai_domain_manager.time, "sleep"):
-                status = ai_domain_manager.save_ai_domains_to_panel_db(
+            ), mock.patch.object(common.time, "sleep"):
+                status = repository.save_ai_domains_to_panel_db(
                     db_path,
                     {"domains": []},
                     {"domains": {}},
@@ -127,7 +137,7 @@ class AiDomainManagerTest(unittest.TestCase):
                 }
             }
 
-            status = ai_domain_manager.save_ai_domains_to_panel_db(db_path, report, decisions)
+            status = repository.save_ai_domains_to_panel_db(db_path, report, decisions)
 
             with sqlite3.connect(db_path) as conn:
                 rows = conn.execute(
@@ -156,7 +166,7 @@ class AiDomainManagerTest(unittest.TestCase):
         state = {"log_inode": "", "log_offset": 0, "events": []}
         now = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
 
-        ai_domain_manager.sync_log(
+        observations.sync_log(
             Path("/does/not/exist"),
             state,
             data_plane_controller=controller,
@@ -198,7 +208,7 @@ class AiDomainManagerTest(unittest.TestCase):
             }
         }
 
-        report = ai_domain_manager.build_domain_report(
+        report = artifact.build_domain_report(
             state,
             observed_at - timedelta(hours=1),
             observed_at,
@@ -217,7 +227,7 @@ class AiDomainManagerTest(unittest.TestCase):
 
     def test_forced_fallback_report_has_no_fake_upstream_and_writes_text(self):
         now = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
-        report = ai_domain_manager.build_domain_report(
+        report = artifact.build_domain_report(
             {"events": []},
             now - timedelta(hours=1),
             now,
@@ -234,7 +244,7 @@ class AiDomainManagerTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
-            ai_domain_manager.write_domain_report(output_dir, report)
+            artifact.write_domain_report(output_dir, report)
             saved_report = json.loads((output_dir / "latest.json").read_text(encoding="utf-8"))
             saved_text = (output_dir / "latest.txt").read_text(encoding="utf-8")
 
@@ -252,8 +262,8 @@ class AiDomainManagerTest(unittest.TestCase):
                 )
                 conn.commit()
 
-            self.assertEqual(ai_domain_manager.read_ai_routing_manual_mode(db_path), "forced_fallback")
-            self.assertEqual(ai_domain_manager.read_ai_routing_manual_mode(Path(tmpdir) / "missing.db"), "auto")
+            self.assertEqual(repository.read_ai_routing_manual_mode(db_path), "forced_fallback")
+            self.assertEqual(repository.read_ai_routing_manual_mode(Path(tmpdir) / "missing.db"), "auto")
 
     def test_build_data_plane_controller_uses_remote_command_timeout(self):
         args = mock.Mock(
@@ -276,7 +286,7 @@ class AiDomainManagerTest(unittest.TestCase):
             dynamic_routing_path=Path("/tmp/dynamic-routing.json"),
         )
 
-        controller = ai_domain_manager.build_data_plane_controller(args)
+        controller = manager.build_data_plane_controller(args)
 
         self.assertEqual(controller.config.remote_command_timeout, 30.0)
         self.assertEqual(controller.config.panel_ports_path, "/root/xray/runtime/panel-ports.json")
@@ -295,7 +305,7 @@ class AiDomainManagerTest(unittest.TestCase):
 
     def test_forced_fallback_skips_domain_classifier(self):
         with mock.patch.object(
-            ai_domain_manager,
+            manager,
             "classify_pending_domains",
             side_effect=AssertionError("forced fallback must not classify domains"),
         ):
@@ -314,8 +324,8 @@ class AiDomainManagerTest(unittest.TestCase):
             lock_path = root / "runtime" / ".ai-domain-manager.lock"
             lock_path.parent.mkdir()
             args = mock.Mock(config_out=root / "runtime" / "config.json", apply_lock_path=lock_path)
-            with ai_domain_manager.exclusive_file_lock(lock_path), self.assertRaises(ai_domain_manager.LockBusyError):
-                ai_domain_manager.run_once(args)
+            with exclusive_file_lock(lock_path), self.assertRaises(LockBusyError):
+                manager.run_once(args)
 
     def test_run_once_delegates_unmanaged_data_plane_reload(self):
         controller = mock.Mock()
@@ -359,21 +369,21 @@ class AiDomainManagerTest(unittest.TestCase):
             def render(*_args):
                 config_out.write_text("new", encoding="utf-8")
 
-            with mock.patch.object(ai_domain_manager, "build_data_plane_controller", return_value=controller), \
-                mock.patch.object(ai_domain_manager, "sync_log"), \
-                mock.patch.object(ai_domain_manager, "sync_builtin_domain_decisions"), \
-                mock.patch.object(ai_domain_manager, "read_ai_routing_manual_mode", return_value="auto"), \
+            with mock.patch.object(manager, "build_data_plane_controller", return_value=controller), \
+                mock.patch.object(manager, "sync_log"), \
+                mock.patch.object(manager, "sync_builtin_domain_decisions"), \
+                mock.patch.object(manager, "read_ai_routing_manual_mode", return_value="auto"), \
                 mock.patch.object(
-                    ai_domain_manager,
+                    manager,
                     "select_ai_target",
                     return_value={"probe_status": "all_reachable", "is_reachable": True, "candidates": []},
                 ), \
-                mock.patch.object(ai_domain_manager, "rerender_config", side_effect=render), \
-                mock.patch.object(ai_domain_manager, "save_ai_domains_to_panel_db", return_value={}), \
-                mock.patch.object(ai_domain_manager, "write_domain_report"), \
-                mock.patch.object(ai_domain_manager, "save_log_state"), \
-                mock.patch.object(ai_domain_manager, "save_json"):
-                result = ai_domain_manager.run_once(args)
+                mock.patch.object(manager, "rerender_config", side_effect=render), \
+                mock.patch.object(manager, "save_ai_domains_to_panel_db", return_value={}), \
+                mock.patch.object(manager, "write_domain_report"), \
+                mock.patch.object(manager, "save_log_state"), \
+                mock.patch.object(manager, "save_json"):
+                result = manager.run_once(args)
                 self.assertTrue((root / "runtime" / "config.json.pending-apply").exists())
 
         self.assertEqual(result["config_apply_status"], "delegated")
@@ -415,18 +425,18 @@ class AiDomainManagerTest(unittest.TestCase):
                 report_output_dir=root / "reports",
             )
 
-            with mock.patch.object(ai_domain_manager, "build_data_plane_controller", return_value=controller), \
-                mock.patch.object(ai_domain_manager, "sync_log"), \
-                mock.patch.object(ai_domain_manager, "sync_builtin_domain_decisions"), \
-                mock.patch.object(ai_domain_manager, "read_ai_routing_manual_mode", return_value="auto"), \
+            with mock.patch.object(manager, "build_data_plane_controller", return_value=controller), \
+                mock.patch.object(manager, "sync_log"), \
+                mock.patch.object(manager, "sync_builtin_domain_decisions"), \
+                mock.patch.object(manager, "read_ai_routing_manual_mode", return_value="auto"), \
                 mock.patch.object(
-                    ai_domain_manager,
+                    manager,
                     "select_ai_target",
                     return_value={"probe_status": "all_reachable", "is_reachable": True, "candidates": []},
                 ), \
-                mock.patch.object(ai_domain_manager, "rerender_config", side_effect=RuntimeError("render failed")):
-                with self.assertRaisesRegex(RuntimeError, "render failed"):
-                    ai_domain_manager.run_once(args)
+                mock.patch.object(manager, "rerender_config", side_effect=RuntimeError("render failed")), \
+                self.assertRaisesRegex(RuntimeError, "render failed"):
+                manager.run_once(args)
 
             self.assertFalse(config_out.with_name("config.json.pending-apply").exists())
 
@@ -472,21 +482,21 @@ class AiDomainManagerTest(unittest.TestCase):
             def render(*_args):
                 config_out.write_text("new", encoding="utf-8")
 
-            with mock.patch.object(ai_domain_manager, "build_data_plane_controller", return_value=controller), \
-                mock.patch.object(ai_domain_manager, "sync_log"), \
-                mock.patch.object(ai_domain_manager, "sync_builtin_domain_decisions"), \
-                mock.patch.object(ai_domain_manager, "read_ai_routing_manual_mode", return_value="auto"), \
+            with mock.patch.object(manager, "build_data_plane_controller", return_value=controller), \
+                mock.patch.object(manager, "sync_log"), \
+                mock.patch.object(manager, "sync_builtin_domain_decisions"), \
+                mock.patch.object(manager, "read_ai_routing_manual_mode", return_value="auto"), \
                 mock.patch.object(
-                    ai_domain_manager,
+                    manager,
                     "select_ai_target",
                     return_value={"probe_status": "all_reachable", "is_reachable": True, "candidates": []},
                 ), \
-                mock.patch.object(ai_domain_manager, "rerender_config", side_effect=render), \
-                mock.patch.object(ai_domain_manager, "save_ai_domains_to_panel_db", return_value={}), \
-                mock.patch.object(ai_domain_manager, "write_domain_report"), \
-                mock.patch.object(ai_domain_manager, "save_log_state"), \
-                mock.patch.object(ai_domain_manager, "save_json"):
-                result = ai_domain_manager.run_once(args)
+                mock.patch.object(manager, "rerender_config", side_effect=render), \
+                mock.patch.object(manager, "save_ai_domains_to_panel_db", return_value={}), \
+                mock.patch.object(manager, "write_domain_report"), \
+                mock.patch.object(manager, "save_log_state"), \
+                mock.patch.object(manager, "save_json"):
+                result = manager.run_once(args)
 
         self.assertEqual(result["config_apply_status"], "unmanaged")
         controller.restart.assert_not_called()
@@ -548,11 +558,11 @@ class AiDomainManagerTest(unittest.TestCase):
                 manual_mode=manual_mode_override,
             )
 
-            with mock.patch.object(ai_domain_manager, "build_data_plane_controller", return_value=controller), \
-                mock.patch.object(ai_domain_manager, "sync_log"), \
-                mock.patch.object(ai_domain_manager, "sync_builtin_domain_decisions"), \
+            with mock.patch.object(manager, "build_data_plane_controller", return_value=controller), \
+                mock.patch.object(manager, "sync_log"), \
+                mock.patch.object(manager, "sync_builtin_domain_decisions"), \
                 mock.patch.object(
-                    ai_domain_manager,
+                    manager,
                     "read_ai_routing_manual_mode",
                     side_effect=AssertionError("explicit mode should not read panel state")
                     if manual_mode_override is not None
@@ -562,7 +572,7 @@ class AiDomainManagerTest(unittest.TestCase):
                     else mock.DEFAULT,
                 ), \
                 mock.patch.object(
-                    ai_domain_manager,
+                    manager,
                     "select_ai_target",
                     return_value={
                         "probe_status": "all_reachable",
@@ -572,31 +582,31 @@ class AiDomainManagerTest(unittest.TestCase):
                         "candidates": [],
                     },
                 ), \
-                mock.patch.object(ai_domain_manager, "rerender_config", side_effect=render), \
+                mock.patch.object(manager, "rerender_config", side_effect=render), \
                 mock.patch.object(
-                    ai_domain_manager,
+                    manager,
                     "save_ai_domains_to_panel_db",
                     side_effect=RuntimeError("synthetic report failure") if report_failure else None,
                     return_value={} if not report_failure else mock.DEFAULT,
                 ), \
-                mock.patch.object(ai_domain_manager, "write_domain_report"), \
-                mock.patch.object(ai_domain_manager, "save_log_state"):
+                mock.patch.object(manager, "write_domain_report"), \
+                mock.patch.object(manager, "save_log_state"):
                 pending = config_out.with_name("config.json.pending-apply")
                 if failure is not None:
                     with self.assertRaises(RuntimeError):
-                        ai_domain_manager.run_once(args)
+                        manager.run_once(args)
                     self.assertTrue(pending.exists())
-                result = ai_domain_manager.run_once(args)
+                result = manager.run_once(args)
                 self.assertFalse(pending.exists())
                 if failure is not None:
-                    ai_domain_manager.run_once(args)
+                    manager.run_once(args)
                 if forced:
                     self.assertEqual(config_out.read_text(encoding="utf-8"), "direct")
 
         self.assertEqual(controller.restart.call_count, 2 if failure is not None else 1)
         return result
 
-    @mock.patch.object(ai_domain_manager, "probe_ai_upstream_candidate")
+    @mock.patch.object(selector, "probe_ai_upstream_candidate")
     def test_select_ai_target_can_manually_select_backup(self, mocked_probe):
         mocked_probe.side_effect = [
             {
@@ -615,7 +625,7 @@ class AiDomainManagerTest(unittest.TestCase):
             },
         ]
 
-        result = ai_domain_manager.select_ai_target(
+        result = selector.select_ai_target(
             [
                 {"upstream_host": "primary.example.com", "upstream_port": 27166},
                 {"upstream_host": "backup.example.com", "upstream_port": 27166},
@@ -629,7 +639,7 @@ class AiDomainManagerTest(unittest.TestCase):
         self.assertEqual(result["probe_status"], "manual_selected")
         self.assertEqual(result["selection_mode"], "manual")
 
-    @mock.patch.object(ai_domain_manager, "probe_ai_upstream_candidate")
+    @mock.patch.object(selector, "probe_ai_upstream_candidate")
     def test_select_ai_target_reports_manual_unreachable_for_unreachable_selection(self, mocked_probe):
         mocked_probe.side_effect = [
             {
@@ -648,7 +658,7 @@ class AiDomainManagerTest(unittest.TestCase):
             },
         ]
 
-        result = ai_domain_manager.select_ai_target(
+        result = selector.select_ai_target(
             [
                 {"upstream_host": "primary.example.com", "upstream_port": 27166},
                 {"upstream_host": "backup.example.com", "upstream_port": 27166},
@@ -669,7 +679,7 @@ class AiDomainManagerTest(unittest.TestCase):
             "generativelanguage.googleapis.com",
             "scholar.google.com",
         ):
-            self.assertTrue(ai_domain_manager.matches_forced_ai_route_domain(domain))
+            self.assertTrue(classifier.matches_forced_ai_route_domain(domain))
 
     def test_chatgpt_and_claude_domain_families_are_forced_to_ai_route(self):
         for domain in (
@@ -682,7 +692,7 @@ class AiDomainManagerTest(unittest.TestCase):
             "console.anthropic.com",
             "assets.claudeusercontent.com",
         ):
-            self.assertTrue(ai_domain_manager.matches_forced_ai_route_domain(domain))
+            self.assertTrue(classifier.matches_forced_ai_route_domain(domain))
 
     def test_aws_domain_families_are_forced_to_ai_route(self):
         for domain in (
@@ -701,7 +711,7 @@ class AiDomainManagerTest(unittest.TestCase):
             "redirect.prod.experiment.routing.cloudfront.aws.a2z.com",
             "foo.aws",
         ):
-            self.assertTrue(ai_domain_manager.matches_forced_ai_route_domain(domain))
+            self.assertTrue(classifier.matches_forced_ai_route_domain(domain))
 
     def test_aws_shared_domain_families_are_not_overmatched(self):
         for domain in (
@@ -710,10 +720,10 @@ class AiDomainManagerTest(unittest.TestCase):
             "video.example.live-video.net",
             "service.a2z.com",
         ):
-            self.assertFalse(ai_domain_manager.matches_forced_ai_route_domain(domain))
+            self.assertFalse(classifier.matches_forced_ai_route_domain(domain))
 
     def test_default_ai_redirect_uses_ipv4(self):
-        payload, reason = ai_domain_manager.render_proxy_template(
+        payload, reason = artifact.render_proxy_template(
             Path("/does/not/exist"),
             {
                 "upstream_host": "nat.qq.pw",
@@ -726,19 +736,19 @@ class AiDomainManagerTest(unittest.TestCase):
         self.assertEqual(payload["outbounds"][0]["settings"]["domainStrategy"], "UseIPv4")
 
     def test_resolve_openai_endpoint_defaults_to_responses_for_remote(self):
-        endpoint, api_style = ai_domain_manager.resolve_openai_endpoint("https://api.openai.com")
+        endpoint, api_style = classifier.resolve_openai_endpoint("https://api.openai.com")
         self.assertEqual(endpoint, "https://api.openai.com/v1/responses")
         self.assertEqual(api_style, "responses")
 
     def test_resolve_openai_endpoint_defaults_to_chat_completions_for_local(self):
-        endpoint, api_style = ai_domain_manager.resolve_openai_endpoint("http://127.0.0.1:11434/v1")
+        endpoint, api_style = classifier.resolve_openai_endpoint("http://127.0.0.1:11434/v1")
         self.assertEqual(endpoint, "http://127.0.0.1:11434/v1/chat/completions")
         self.assertEqual(api_style, "chat_completions")
 
     def test_local_openai_base_url_detection(self):
-        self.assertTrue(ai_domain_manager.is_local_openai_base_url("http://127.0.0.1:11434/v1"))
-        self.assertTrue(ai_domain_manager.is_local_openai_base_url("http://192.168.1.10:8000"))
-        self.assertFalse(ai_domain_manager.is_local_openai_base_url("https://api.openai.com/v1/responses"))
+        self.assertTrue(classifier.is_local_openai_base_url("http://127.0.0.1:11434/v1"))
+        self.assertTrue(classifier.is_local_openai_base_url("http://192.168.1.10:8000"))
+        self.assertFalse(classifier.is_local_openai_base_url("https://api.openai.com/v1/responses"))
 
     @mock.patch("urllib.request.urlopen")
     def test_classify_domains_via_chat_completions_without_api_key(self, mocked_urlopen):
@@ -767,7 +777,7 @@ class AiDomainManagerTest(unittest.TestCase):
             }
         )
 
-        result = ai_domain_manager.classify_domains_via_openai(
+        result = classifier.classify_domains_via_openai(
             ["chatgpt.com", "example.com"],
             api_key="",
             model="qwen2.5",
@@ -801,7 +811,7 @@ class AiDomainManagerTest(unittest.TestCase):
             }
         )
 
-        result = ai_domain_manager.classify_domains_via_openai(
+        result = classifier.classify_domains_via_openai(
             ["openai.com"],
             api_key="secret-key",
             model="gpt-5.5",
@@ -816,7 +826,7 @@ class AiDomainManagerTest(unittest.TestCase):
         payload = json.loads(request.data.decode("utf-8"))
         self.assertIn("input", payload)
 
-    @mock.patch("app.xray.ai_domain_manager.classify_domains_via_openai")
+    @mock.patch("app.xray.ai_routing.classifier.classify_domains_via_openai")
     def test_classify_pending_domains_keeps_pending_when_openai_unavailable(self, mocked_openai):
         mocked_openai.side_effect = RuntimeError("openai http 401")
         decisions = {"domains": {}}
@@ -836,7 +846,7 @@ class AiDomainManagerTest(unittest.TestCase):
 
             stderr = io.StringIO()
             with mock.patch("sys.stderr", stderr):
-                pending = ai_domain_manager.classify_pending_domains(
+                pending = classifier.classify_pending_domains(
                     decisions,
                     decisions_path,
                     observed_domains,
@@ -855,7 +865,7 @@ class AiDomainManagerTest(unittest.TestCase):
             "method": "reality",
         }
 
-        result = ai_domain_manager.probe_ai_upstream_candidate(
+        result = candidates.probe_ai_upstream_candidate(
             {
                 "upstream_host": "ai.example.com",
                 "upstream_port": 443,
@@ -883,18 +893,18 @@ class AiDomainManagerTest(unittest.TestCase):
             "method": "tcp",
         }
 
-        result = ai_domain_manager.select_ai_target(
+        result = selector.select_ai_target(
             [{"upstream_host": "ai.example.com", "upstream_port": 443}],
             2.0,
             probe_controller=controller,
         )
 
         self.assertEqual(result["probe_status"], "probe_error")
-        self.assertFalse(ai_domain_manager.should_fallback_to_primary_route(result))
+        self.assertFalse(selector.should_fallback_to_primary_route(result))
 
-    @mock.patch("app.xray.ai_domain_manager.build_data_plane_controller")
-    @mock.patch("app.xray.ai_domain_manager.rerender_config")
-    @mock.patch("app.xray.ai_domain_manager.probe_ai_upstream_candidate")
+    @mock.patch("app.xray.ai_routing.manager.build_data_plane_controller")
+    @mock.patch("app.xray.ai_routing.manager.rerender_config")
+    @mock.patch("app.xray.ai_routing.selector.probe_ai_upstream_candidate")
     def test_run_once_falls_back_to_primary_route_when_all_ai_upstreams_are_unreachable(
         self,
         mocked_probe,
@@ -976,7 +986,7 @@ class AiDomainManagerTest(unittest.TestCase):
                 report_output_dir=report_output_dir,
             )
 
-            ai_domain_manager.run_once(args)
+            manager.run_once(args)
 
             self.assertFalse(dynamic_routing_path.exists())
             report = json.loads((report_output_dir / "latest.json").read_text(encoding="utf-8"))
