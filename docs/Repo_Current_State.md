@@ -7,7 +7,7 @@ Last verified: 2026-09-09 @ working tree
 - AI Routing 第一阶段 Python 拆分与 NodeController 第二阶段均已合并到 `main`；本机默认控制面与数据库备份服务已按 `6c8eef3` 重建并通过健康检查，Xray profile 未启用。
 - PanelState 第三阶段依赖收缩已完成：它保留组合根/兼容 facade 角色，域 service 改为持有显式 repository、renderer、node controller、锁和兄弟 service 依赖。
 - 应用级 Core 协调器第四阶段已完成：SQLite 连接/状态存储和 schema bootstrap 位于 `app/storage/`，Xray apply 事务位于 `app/xray/apply.py`，节点 fleet helper、Xray stats reader、runtime workers 和 `ApplicationLifecycle` 均已从旧 Core 边界移出。
-- 第五阶段已开始：`app/bootstrap.py` 是控制面 composition root，`app/panel.py` 构造并注入 Application，Web factory 不再在 import-time 创建 PanelState。
+- 第五阶段已开始：`app/bootstrap.py` 是控制面 composition root，`app/panel.py` 构造并注入 Application，Web factory 不再在 import-time 创建 PanelState；架构边界检查已加入 `tests/architecture/`。
 
 ## Implemented
 
@@ -23,6 +23,7 @@ Last verified: 2026-09-09 @ working tree
 - `app/storage/sqlite.py` 提供带共享写锁的 `SQLiteDatabase.connect()` 与显式 `transaction()`；`app/storage/schema.py` 只持有通用 `app_state` DDL，端口、流量、探针、AI、DNS 和商业表由各自 service 的幂等 schema hook 创建/迁移，并由生命周期在同一连接上按依赖顺序调用。
 - `app/bootstrap.py` 集中创建 `SQLiteDatabase`、`SchemaBootstrap`、NodeController、域 service、runtime worker 和 `ApplicationLifecycle`；`PanelState` 只保留兼容 facade 和显式组件图接收逻辑。
 - `app/web/core.py` 的 `create_app(application)` 只消费调用方提供的 Application/State，将同一实例保存到 `flask_app.extensions["application"]`；路由模块在注入后注册，Web 不再负责业务对象构造。
+- `tests/architecture/` 使用标准库 AST 检查 `xray/storage/runtime` 到 Web/State 的禁止依赖、Web 业务依赖构造，以及 canonical 包与兼容 facade 的方向；不依赖生产 singleton 或网络服务。
 - `app/xray/apply.py` 的 `XrayApplyService` 负责数据库变更后的 panel-ports/config render、校验、远端同步、主/备 Xray 重载、提交和失败回滚；`PortsService`、`TrafficService`、`CommerceService` 显式持有它作为 apply collaborator。
 - 商业履约通过 `XrayApplyService.apply_lock()` 与 `persist_and_reload_locked()` 接入已有事务，不再访问 apply service 的私有锁/回滚方法。
 - `app/xray/node/fleet.py` 提供无状态的多 AI 节点状态聚合、同步和重启 helper；`app/xray/stats.py` 的 `XrayStatsReader` 隔离 `statsquery` 解析，`TrafficService` 直接依赖它。
@@ -34,11 +35,11 @@ Last verified: 2026-09-09 @ working tree
 
 ## In Progress
 
-- Web application factory 已切换到显式 Application 注入；旧 view 的扁平 facade 调用仍在迁移期保留。
+- 架构边界测试已落地；旧 view 的扁平 facade 调用仍在迁移期保留。
 
 ## Known Issues / Failing Checks
 
-- 全量 `.venv/bin/python -m pytest -q` 通过：270 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
+- 全量 `.venv/bin/python -m pytest -q` 通过：280 passed、1 skipped；唯一跳过项需要设置 `XRAY_TEST_BINARY` 并安装 HAProxy 才能执行真实传输测试。
 - NodeController、fleet、stats 与 runtime 聚焦测试均通过；backend 选择覆盖 SSH、local、Docker、unmanaged 和旧控制器别名。
 - Phase 4 聚焦回归通过：生命周期、storage、组合、节点控制、DNS、商业和 unified entry 均通过；新增领域 schema hook、SQLite 共享写锁、runtime worker、node fleet、Xray stats 与 AI launcher 测试均通过 Ruff。修改后的 state/storage/web 文件通过 `py_compile` 和 `git diff --check`；`ruff check app/state` 仍报告既有的 `BLE001`、`SIM117` 等规则告警。
 - 本机部署使用了 `docker compose up -d --build`；仓库文档引用的 CPU-aware 构建脚本在本机不存在，因此未使用该脚本。
