@@ -42,6 +42,25 @@ def test_panel_state_wires_domains_with_explicit_dependencies():
     assert state.lifecycle.dns_failover_worker is state.dns_failover_worker
 
 
+def test_bootstrap_builds_canonical_application_from_one_component_graph():
+    from app.bootstrap import Application, build_application, build_application_components
+
+    components = build_application_components()
+    application = Application(components)
+    built = build_application()
+
+    assert isinstance(application, Application)
+    assert isinstance(built, Application)
+    assert application.database is components["database"]
+    assert application.xray_apply.repository is application.database
+    assert application.xray_apply.node_controller is application.data_plane
+    assert application.traffic.stats_reader is application.xray_stats
+    assert application.maintenance_worker.stop_event is application.stop_event
+    assert application.dns_failover_worker.stop_event is application.stop_event
+    assert application.lifecycle.stop_event is application.stop_event
+    assert "NodeController(" not in inspect.getsource(application.__class__.__mro__[1].__init__)
+
+
 def test_domain_services_do_not_retain_panel_backreferences():
     from app.state import PanelState
     from app.state.ai_routing import AiRoutingService
